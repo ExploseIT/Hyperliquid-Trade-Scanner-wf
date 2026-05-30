@@ -1,0 +1,15 @@
+# Build outputs
+bin/
+obj/
+
+# Config with credentials — NEVER commit this
+config.json
+
+# User-specific files
+*.user
+*.suo
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db

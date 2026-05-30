@@ -1,0 +1,23 @@
+# ── Sensitive config (contains private key — NEVER commit) ──────────────────
+config.json
+
+# ── Build output ─────────────────────────────────────────────────────────────
+bin/
+obj/
+
+# ── Visual Studio / Rider ────────────────────────────────────────────────────
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.DotSettings.user
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ── Zip archives ─────────────────────────────────────────────────────────────
+HyperliquidScanner_zips/
+*.zip
