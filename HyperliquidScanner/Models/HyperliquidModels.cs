@@ -74,10 +74,13 @@ namespace HyperliquidScanner.Models
         public decimal Cmf            { get; set; }  // Chaikin Money Flow (negative = selling, positive = buying)
         public decimal RecentTrendPct { get; set; }  // price change over last 10 complete candles (context: falling knife vs sudden flush)
 
-        public bool HasAlert => VolumeSpike || PriceSurge || IsAbsorption || IsDistribution || IsClimax;
+        public bool    IsReversalSetup { get; set; }  // oversold RSI turning up + green candle + beaten-down context
 
-        public string SignalLabel => IsBullish ? "✓ Bullish"
-                                  : IsBearish ? "✗ Bearish"
+        public bool HasAlert => VolumeSpike || PriceSurge || IsAbsorption || IsDistribution || IsClimax || IsReversalSetup;
+
+        public string SignalLabel => IsBullish        ? "✓ Bullish"
+                                  : IsReversalSetup  ? "↑ Reversal?"
+                                  : IsBearish        ? "✗ Bearish"
                                   : "–";
     }
 

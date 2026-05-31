@@ -460,7 +460,7 @@ namespace HyperliquidScanner.Forms
             // Base filter — directional alerts punch through their matching filter only
             var toShow = _filterCombo.SelectedIndex switch
             {
-                1 => _lastResults.Where(r => r.IsBullish || r.IsAbsorption || r.IsClimax),  // Bullish + reversal-up signals
+                1 => _lastResults.Where(r => r.IsBullish || r.IsAbsorption || r.IsClimax || r.IsReversalSetup),  // Bullish + reversal-up signals
                 2 => _lastResults.Where(r => r.IsBearish || r.IsDistribution),              // Bearish + reversal-down signals
                 3 => _lastResults.Where(r => r.HasAlert),                                    // All alerts
                 _ => _lastResults                                                             // All assets
@@ -503,6 +503,8 @@ namespace HyperliquidScanner.Forms
                 _grid.Rows[idx].Tag = r;
                 if (r.IsClimax)
                     _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(40, 10, 55);  // dark purple — panic sell exhaustion
+                else if (r.IsReversalSetup)
+                    _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(15, 30, 60);  // dark blue — oversold reversal candidate
                 else if (r.IsAbsorption)
                     _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(10, 40, 45);  // teal  — quiet absorption
                 else if (r.IsDistribution)
@@ -522,8 +524,9 @@ namespace HyperliquidScanner.Forms
             if (col == "Signal")
             {
                 var sig = e.Value?.ToString() ?? "";
-                e.CellStyle.ForeColor = sig.Contains("Bullish") ? Color.FromArgb(80, 220, 130)
-                                      : sig.Contains("Bearish") ? Color.FromArgb(220, 80, 80)
+                e.CellStyle.ForeColor = sig.Contains("Bullish")  ? Color.FromArgb(80, 220, 130)
+                                      : sig.Contains("Reversal") ? Color.FromArgb(100, 160, 255)  // blue — oversold reversal candidate
+                                      : sig.Contains("Bearish")  ? Color.FromArgb(220, 80, 80)
                                       : Color.FromArgb(120, 120, 120);
             }
 

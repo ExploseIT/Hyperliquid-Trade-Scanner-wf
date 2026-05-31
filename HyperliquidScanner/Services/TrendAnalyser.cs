@@ -164,6 +164,24 @@ namespace HyperliquidScanner.Services
                 }
             }
 
+            // ── Reversal setup: oversold but momentum turning ─────────────────
+            // Conditions (all must hold):
+            //   1. RSI oversold (< 40) — beaten down
+            //   2. RSI slope turning positive — momentum shifting up
+            //   3. 10-bar trend negative — asset has been falling (context: not just pausing)
+            //   4. Last complete candle is green — early price recovery
+            // Not flagged if already bullish (it would be redundant).
+            if (!result.IsBullish && quotes.Count >= 12)
+            {
+                var lastComplete = quotes[^2];
+                var lastCandleGreen = lastComplete.Close > lastComplete.Open;
+
+                result.IsReversalSetup = result.Rsi < 40m
+                                      && result.RsiSlope > -1m
+                                      && result.RecentTrendPct < -1.5m
+                                      && lastCandleGreen;
+            }
+
             return result;
         }
     }
