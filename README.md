@@ -1,4 +1,6 @@
-# Hyperliquid Trend Scanner
+# Hyperliquid Trading Scanner helper
+
+![Hyperliquid Scanner](docs/screenshot.png)
 
 A Windows Forms app that scans all Hyperliquid perpetual assets and identifies
 which are trending bullish across selectable timeframes.
@@ -7,7 +9,7 @@ which are trending bullish across selectable timeframes.
 
 - Windows 10/11
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- Visual Studio 2022 (or `dotnet build` from the command line)
+- Visual Studio 2026 (or `dotnet build` from the command line)
 
 ## Setup
 
