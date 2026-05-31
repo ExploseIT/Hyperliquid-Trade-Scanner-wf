@@ -39,6 +39,10 @@ namespace HyperliquidScanner.Services
             var hip3Assets = assets.Where(a =>  a.Name.Contains(':')).ToList();
             var limited    = mainAssets.Concat(hip3Assets).ToList();
 
+            // Fetch live mid prices once for all assets — used to override the
+            // stale candle-close price in the grid. Falls back to candle close on failure.
+            var liveMids = await _client.GetAllMidsAsync(ct);
+
             var results      = new List<AssetScanResult>();
             var candleCount  = Timeframes.CandleCount(timeframe);
 
@@ -56,7 +60,24 @@ namespace HyperliquidScanner.Services
                     if (candles.Count > 0 && IsDataFresh(candles[^1].CloseTimeMs, timeframe))
                     {
                         var result = _analyser.Analyse(asset.Name, timeframe, candles);
+
+                        // Override stale candle-close price with live mid price if available
+                        if (liveMids.TryGetValue(asset.Name, out var livePrice) && livePrice > 0m)
+                            result.LastPrice = livePrice;
+
                         results.Add(result);
+                    }
+                    else
+                    {
+                        // Candles missing or stale — add a placeholder so the asset
+                        // still appears in search results rather than vanishing silently.
+                        results.Add(new AssetScanResult
+                        {
+                            Asset        = asset.Name,
+                            Timeframe    = timeframe,
+                            ScannedAt    = DateTime.UtcNow,
+                            BullishScore = -1  // sentinel: no data
+                        });
                     }
                 }
                 catch (OperationCanceledException)

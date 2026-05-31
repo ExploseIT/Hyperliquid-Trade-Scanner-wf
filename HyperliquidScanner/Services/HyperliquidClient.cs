@@ -115,8 +115,11 @@ namespace HyperliquidScanner.Services
                 var name = t["name"]?.Value<string>() ?? string.Empty;
                 if (string.IsNullOrEmpty(name)) continue;
 
-                // HIP-3 names are prefixed so callers can pass them directly to the candle API
-                var fullName = dex != null ? $"{dex}:{name}" : name;
+                // HIP-3 names are prefixed so callers can pass them directly to the candle API.
+                // If the API already returns a prefixed name (e.g. "xyz:MU"), don't double-prefix.
+                var fullName = dex != null && !name.Contains(':')
+                    ? $"{dex}:{name}"
+                    : name;
 
                 // Skip delisted assets — open interest is 0 in the parallel assetCtxs array.
                 if (ctxArr != null && i < ctxArr.Count)
@@ -140,6 +143,35 @@ namespace HyperliquidScanner.Services
         }
 
         /// <summary>
+        /// Returns the current mid price for every asset in one request.
+        /// Keys are asset names as returned by the exchange (e.g. "BTC", "ETH", "xyz:MU").
+        /// Returns an empty dictionary on failure — callers fall back to candle close price.
+        /// </summary>
+        public async Task<Dictionary<string, decimal>> GetAllMidsAsync(CancellationToken ct = default)
+        {
+            var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var response = await PostInfoAsync(new { type = "allMids" }, ct);
+                if (response is JObject obj)
+                {
+                    foreach (var prop in obj.Properties())
+                    {
+                        if (decimal.TryParse(prop.Value?.Value<string>(),
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var price))
+                            result[prop.Name] = price;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[allMids] failed: {ex.Message}");
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Returns OHLCV candles for the given asset and interval.
         /// </summary>
         /// <param name="asset">Asset name e.g. "BTC", "ETH"</param>
@@ -152,41 +184,52 @@ namespace HyperliquidScanner.Services
             var endMs      = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var startMs    = endMs - intervalMs * count;
 
-            var payload = new
-            {
-                type = "candleSnapshot",
-                req  = new
-                {
-                    coin      = asset,
-                    interval  = interval,
-                    startTime = startMs,
-                    endTime   = endMs
-                }
-            };
-
-            var response = await PostInfoAsync(payload, ct);
+            // For HIP-3 assets (e.g. "xyz:MU"), try the full prefixed name first,
+            // then fall back to just the base symbol ("MU") if the API returns nothing.
+            var coinNamesToTry = asset.Contains(':')
+                ? new[] { asset, asset.Substring(asset.IndexOf(':') + 1) }
+                : new[] { asset };
 
             var candles = new List<CandleData>();
-            if (response is not JArray arr) return candles;
 
-            foreach (var item in arr)
+            foreach (var coin in coinNamesToTry)
             {
-                // Each candle is a JObject with named fields: t, T, s, i, o, c, h, l, v, n
-                if (item is not JObject row) continue;
-
-                candles.Add(new CandleData
+                var payload = new
                 {
-                    OpenTimeMs  = row["t"]?.Value<long>()             ?? 0,
-                    CloseTimeMs = row["T"]?.Value<long>()             ?? 0,
-                    Symbol      = row["s"]?.Value<string>()           ?? asset,
-                    Interval    = row["i"]?.Value<string>()           ?? interval,
-                    Open        = ParseDecimal(row["o"]),
-                    Close       = ParseDecimal(row["c"]),
-                    High        = ParseDecimal(row["h"]),
-                    Low         = ParseDecimal(row["l"]),
-                    Volume      = ParseDecimal(row["v"]),
-                    TradeCount  = row["n"]?.Value<int>()              ?? 0
-                });
+                    type = "candleSnapshot",
+                    req  = new
+                    {
+                        coin      = coin,
+                        interval  = interval,
+                        startTime = startMs,
+                        endTime   = endMs
+                    }
+                };
+
+                var response = await PostInfoAsync(payload, ct);
+                if (response is not JArray arr || arr.Count == 0) continue;
+
+                foreach (var item in arr)
+                {
+                    // Each candle is a JObject with named fields: t, T, s, i, o, c, h, l, v, n
+                    if (item is not JObject row) continue;
+
+                    candles.Add(new CandleData
+                    {
+                        OpenTimeMs  = row["t"]?.Value<long>()             ?? 0,
+                        CloseTimeMs = row["T"]?.Value<long>()             ?? 0,
+                        Symbol      = row["s"]?.Value<string>()           ?? asset,
+                        Interval    = row["i"]?.Value<string>()           ?? interval,
+                        Open        = ParseDecimal(row["o"]),
+                        Close       = ParseDecimal(row["c"]),
+                        High        = ParseDecimal(row["h"]),
+                        Low         = ParseDecimal(row["l"]),
+                        Volume      = ParseDecimal(row["v"]),
+                        TradeCount  = row["n"]?.Value<int>()              ?? 0
+                    });
+                }
+
+                if (candles.Count > 0) break; // got data — no need to try fallback name
             }
 
             return candles;

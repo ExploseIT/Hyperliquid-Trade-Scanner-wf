@@ -44,7 +44,11 @@ SqueezeLeaderboard (Forms/)
 ScannerService (Services/)
   └─ calls HyperliquidClient.GetAssetsAsync() -> all perp assets (main + HIP-3)
   └─ MaxAssets limit applies only to main HL assets; HIP-3 assets always included
+  └─ fetches live mid prices via GetAllMidsAsync() once before the scan loop
   └─ for each asset: GetCandlesAsync() -> feeds TrendAnalyser
+  └─ overrides result.LastPrice with live mid price if available (fixes stale candle price)
+  └─ assets with empty/stale candles get a placeholder result (BullishScore=-1) so they
+       still appear in search results rather than vanishing silently
   └─ throttles by config.requestDelayMs
   └─ honours CancellationToken
 
@@ -52,13 +56,20 @@ HyperliquidClient (Services/)
   └─ POST https://api.hyperliquid.xyz/info
   └─ GetAssetsAsync() — fetches main universe + HIP-3 dexes from config.hip3Dexes
        HIP-3 asset names prefixed: "xyz:MU", "xyz:XYZ100" etc.
+       The xyz dex API returns names already prefixed (e.g. "xyz:MU") — FetchUniverseAsync
+       does NOT add another prefix if the name already contains a colon.
   └─ FetchUniverseAsync(dex?) — internal; null = main HL, string = HIP-3 dex
+  └─ GetAllMidsAsync() — fetches live mid prices for all assets in one call {"type":"allMids"}
+       Used by ScannerService to override stale candle-close prices in the grid.
   └─ GetCandlesAsync(coin, interval, count) — coin can be "BTC" or "xyz:MU"
+       For HIP-3 assets: tries full prefixed name first ("xyz:MU"), falls back to base
+       symbol ("MU") if the API returns nothing — handles API format inconsistencies.
 
 TrendAnalyser (Services/)
   └─ EMA crossover (9/21), RSI(14) > 50, MACD bullish
   └─ BullishScore 0-3, IsBullish = score >= bullishThreshold
   └─ Also detects: VolumeSpike, PriceSurge, IsAbsorption, IsDistribution, IsClimax
+  └─ IsReversalSetup: RSI < 40 + RSI slope > -1 + 10-bar trend < -1.5% + last candle green
 
 BinanceLiquidationFeed (Services/)
   └─ MISNAMED — actually uses OKX WebSocket (name kept for API compatibility)
@@ -328,6 +339,11 @@ Note: `/api/futures/liquidation/order` (REST polling) returns 401 on Hobbyist pl
 - HL asset filter uses `null` to mean "no filter" — if asset fetch fails on startup, all symbols pass through
 - `MaxAssets` deliberately excludes HIP-3 assets so user-configured dexes always fully scan
 - Colour scheme is inverted from standard trading convention to match CoinGlass heatmap
+- Price column shows live mid price from `allMids` API, NOT the last candle close — prevents stale prices
+- HIP-3 candle API: try "xyz:MU" first, fall back to "MU" — the xyz dex API is inconsistent about name format
+- HIP-3 assets never appear in the liquidation leaderboard — they only trade on HL, not OKX/Bybit
+- Search always shows matching assets even if BullishScore == -1 (no data) — so HIP-3 assets are always findable
+- `IsReversalSetup` surfaces oversold assets showing early recovery — shown in blue as "↑ Reversal?" in the grid
 
 ---
 

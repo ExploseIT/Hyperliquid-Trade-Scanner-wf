@@ -467,10 +467,10 @@ namespace HyperliquidScanner.Forms
             };
             toShow = toShow.Where(r => r.BullishScore >= 0); // exclude scan errors
 
-            // Search overrides filter — show any matching asset
+            // Search overrides filter — show any matching asset including errors
             if (!string.IsNullOrEmpty(search))
-                toShow = _lastResults.Where(r => r.BullishScore >= 0
-                             && r.Asset.Contains(search, StringComparison.OrdinalIgnoreCase));
+                toShow = _lastResults.Where(r =>
+                             r.Asset.Contains(search, StringComparison.OrdinalIgnoreCase));
 
             foreach (var r in toShow.OrderByDescending(r => r.HasAlert)
                                     .ThenByDescending(r => r.BullishScore)
