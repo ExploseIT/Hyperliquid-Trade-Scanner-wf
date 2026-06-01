@@ -42,7 +42,10 @@ namespace HyperliquidScanner.Forms
 
         // Config hot-reload
         private FileSystemWatcher?                 _configWatcher;
+        private FileSystemWatcher?                 _sourceConfigWatcher;
         private System.Windows.Forms.Timer?        _configReloadDebounce;
+        private System.Windows.Forms.Timer?        _configPollTimer;
+        private DateTime                           _lastConfigWrite = DateTime.MinValue;
 
         // Latest 5-min leaderboard snapshot — keyed by OKX BaseSymbol (upper-case)
         private Dictionary<string, LiquidationAggregator.SymbolSummary> _liqSummaries
@@ -832,33 +835,65 @@ namespace HyperliquidScanner.Forms
 
         private void SetupConfigWatcher()
         {
-            var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
-            if (!File.Exists(configPath)) return;
+            // Poll both source and output config.json every 2 seconds.
+            // FileSystemWatcher is unreliable with editors that save via temp+rename
+            // (VS Code, Notepad++ etc.) — polling is simpler and always works.
+            var outputPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            var sourcePath = FindSourceConfig(); // project directory config.json
 
-            _configWatcher = new FileSystemWatcher(
-                Path.GetDirectoryName(configPath)!, "config.json")
-            {
-                NotifyFilter        = NotifyFilters.LastWrite,
-                EnableRaisingEvents = true
-            };
+            // Seed the last-write time so we don't fire on startup
+            _lastConfigWrite = GetNewestWriteTime(outputPath, sourcePath);
 
-            // Debounce — FileSystemWatcher fires multiple times per save
-            _configReloadDebounce = new System.Windows.Forms.Timer { Interval = 600 };
-            _configReloadDebounce.Tick += (_, _) =>
+            _configPollTimer = new System.Windows.Forms.Timer { Interval = 2_000 };
+            _configPollTimer.Tick += (_, _) =>
             {
-                _configReloadDebounce.Stop();
+                var newest = GetNewestWriteTime(outputPath, sourcePath);
+                if (newest <= _lastConfigWrite) return;
+
+                _lastConfigWrite = newest;
+
+                // If source is newer, copy it to output so the exe picks up the change
+                if (sourcePath != null && File.Exists(sourcePath)
+                    && File.GetLastWriteTime(sourcePath) >= File.GetLastWriteTime(outputPath))
+                {
+                    try { File.Copy(sourcePath, outputPath, overwrite: true); }
+                    catch { /* non-fatal */ }
+                }
+
                 ReloadConfig();
             };
+            _configPollTimer.Start();
+        }
 
-            _configWatcher.Changed += (_, _) =>
+        private static DateTime GetNewestWriteTime(string outputPath, string? sourcePath)
+        {
+            var t = File.Exists(outputPath) ? File.GetLastWriteTime(outputPath) : DateTime.MinValue;
+            if (sourcePath != null && File.Exists(sourcePath))
             {
-                if (!IsHandleCreated || IsDisposed) return;
-                BeginInvoke(() =>
+                var st = File.GetLastWriteTime(sourcePath);
+                if (st > t) t = st;
+            }
+            return t;
+        }
+
+        /// <summary>
+        /// Walks up from the exe directory looking for a config.json alongside a .csproj
+        /// (the project source directory, not the build output).
+        /// </summary>
+        private static string? FindSourceConfig()
+        {
+            var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                if (dir.GetFiles("*.csproj").Length > 0)
                 {
-                    _configReloadDebounce?.Stop();
-                    _configReloadDebounce?.Start();
-                });
-            };
+                    var candidate = Path.Combine(dir.FullName, "config.json");
+                    if (File.Exists(candidate)) return candidate;
+                }
+                if (dir.GetDirectories(".git").Length > 0) break;
+                dir = dir.Parent;
+            }
+            return null;
         }
 
         private void ReloadConfig()
@@ -897,7 +932,10 @@ namespace HyperliquidScanner.Forms
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             _autoRefreshTimer.Stop();
+            _configPollTimer?.Stop();
+            _configPollTimer?.Dispose();
             _configWatcher?.Dispose();
+            _sourceConfigWatcher?.Dispose();
             _configReloadDebounce?.Dispose();
             _cts?.Cancel();
             _aggregator?.Dispose();
