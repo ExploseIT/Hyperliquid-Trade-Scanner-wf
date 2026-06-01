@@ -32,6 +32,7 @@ namespace HyperliquidScanner.Forms
         private System.Windows.Forms.Timer _autoRefreshTimer = null!;
         private LiquidationPanel? _liqPanel;
         private PositionsPanel?   _positionsPanel;
+        private PositionMonitor?  _monitor;
 
         private readonly BinanceLiquidationFeed?  _binanceFeed;
         private readonly BybitLiquidationFeed?   _bybitFeed;
@@ -39,17 +40,23 @@ namespace HyperliquidScanner.Forms
         private CancellationTokenSource? _cts;
         private List<AssetScanResult>    _lastResults = new();
 
+        // Config hot-reload
+        private FileSystemWatcher?                 _configWatcher;
+        private System.Windows.Forms.Timer?        _configReloadDebounce;
+
         // Latest 5-min leaderboard snapshot — keyed by OKX BaseSymbol (upper-case)
         private Dictionary<string, LiquidationAggregator.SymbolSummary> _liqSummaries
             = new(StringComparer.OrdinalIgnoreCase);
 
         public MainForm(AppConfig config, AppSettings appSettings, HyperliquidClient client,
-                        ScannerService scanner, CoinglassClient? coinglass = null)
+                        ScannerService scanner, PositionMonitor? monitor = null,
+                        CoinglassClient? coinglass = null)
         {
             _config      = config;
             _appSettings = appSettings;
             _client      = client;
             _scanner     = scanner;
+            _monitor     = monitor;
             _coinglass   = coinglass;
 
             // Load custom alert sounds — fall back to system sounds if files not found
@@ -345,12 +352,17 @@ namespace HyperliquidScanner.Forms
             // (liquidation panel occupies the right side separately)
             var centrePanel = new Panel { Dock = DockStyle.Fill };
 
-            _positionsPanel = new PositionsPanel(_client, _config);
+            _positionsPanel = new PositionsPanel(_client, _config, _monitor);
             centrePanel.Controls.Add(_grid);
             centrePanel.Controls.Add(_positionsPanel);
 
-            // Trigger initial position load on startup
-            Load += async (_, _) => await _positionsPanel.RefreshAsync();
+            // On startup: initialise asset indexes (needed for order placement) then load positions
+            Load += async (_, _) =>
+            {
+                await _client.InitialiseAssetIndexesAsync();
+                await _positionsPanel.RefreshAsync();
+                SetupConfigWatcher();
+            };
 
             Controls.Add(centrePanel);
             Controls.Add(toolbar);
@@ -816,9 +828,77 @@ namespace HyperliquidScanner.Forms
             if (!scanning) _progressBar.Value = 0;
         }
 
+        // ── Config hot-reload ─────────────────────────────────────────────────
+
+        private void SetupConfigWatcher()
+        {
+            var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            if (!File.Exists(configPath)) return;
+
+            _configWatcher = new FileSystemWatcher(
+                Path.GetDirectoryName(configPath)!, "config.json")
+            {
+                NotifyFilter        = NotifyFilters.LastWrite,
+                EnableRaisingEvents = true
+            };
+
+            // Debounce — FileSystemWatcher fires multiple times per save
+            _configReloadDebounce = new System.Windows.Forms.Timer { Interval = 600 };
+            _configReloadDebounce.Tick += (_, _) =>
+            {
+                _configReloadDebounce.Stop();
+                ReloadConfig();
+            };
+
+            _configWatcher.Changed += (_, _) =>
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(() =>
+                {
+                    _configReloadDebounce?.Stop();
+                    _configReloadDebounce?.Start();
+                });
+            };
+        }
+
+        private void ReloadConfig()
+        {
+            try
+            {
+                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                var json       = File.ReadAllText(configPath);
+                var fresh      = Newtonsoft.Json.JsonConvert.DeserializeObject<AppConfig>(json);
+                if (fresh == null) return;
+
+                // Update risk-related fields in-place so all existing references stay valid
+                _config.AutoRiskManagement = fresh.AutoRiskManagement;
+                _config.SymbolInfo         = fresh.SymbolInfo;
+                _config.BullishThreshold   = fresh.BullishThreshold;
+                _config.RequestDelayMs     = fresh.RequestDelayMs;
+
+                // Reset monitor state — new thresholds apply cleanly
+                _monitor?.Reset();
+
+                _statusLabel.Text      = "⟳ config.json reloaded — risk settings updated";
+                _statusLabel.ForeColor = Color.FromArgb(100, 180, 255);
+
+                // Restore label colour after 5s
+                var t = new System.Windows.Forms.Timer { Interval = 5_000 };
+                t.Tick += (_, _) => { t.Stop(); t.Dispose(); _statusLabel.ForeColor = Color.Silver; };
+                t.Start();
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text      = $"Config reload failed: {ex.Message}";
+                _statusLabel.ForeColor = Color.FromArgb(220, 80, 80);
+            }
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             _autoRefreshTimer.Stop();
+            _configWatcher?.Dispose();
+            _configReloadDebounce?.Dispose();
             _cts?.Cancel();
             _aggregator?.Dispose();
             _binanceFeed?.Dispose();

@@ -17,12 +17,50 @@ namespace HyperliquidScanner.Services
         private readonly HttpClient _http;
         private readonly AppConfig  _config;
 
+        // Asset index cache: symbol → (universe index, size decimals)
+        // Populated by InitialiseAssetIndexesAsync() on startup.
+        private Dictionary<string, (int index, int szDecimals)> _assetIndexes
+            = new(StringComparer.OrdinalIgnoreCase);
+
         public HyperliquidClient(AppConfig config)
         {
             _config = config;
             _http   = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _http.DefaultRequestHeaders.Add("User-Agent", "HyperliquidScanner/1.0");
         }
+
+        /// <summary>
+        /// Fetches the main HL asset universe and caches symbol → index mappings.
+        /// Must be called once on startup before any order placement.
+        /// </summary>
+        public async Task InitialiseAssetIndexesAsync(CancellationToken ct = default)
+        {
+            try
+            {
+                var response = await PostInfoAsync(new { type = "meta" }, ct);
+                var metaObj  = response is JArray arr ? arr[0] as JObject : response as JObject;
+                var universe = metaObj?["universe"] as JArray;
+                if (universe == null) return;
+
+                var indexes = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < universe.Count; i++)
+                {
+                    var name   = universe[i]["name"]?.Value<string>() ?? string.Empty;
+                    var szDec  = universe[i]["szDecimals"]?.Value<int>() ?? 0;
+                    if (!string.IsNullOrEmpty(name))
+                        indexes[name] = (i, szDec);
+                }
+                _assetIndexes = indexes;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AssetIndex] init failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Returns the asset index and size decimals for a symbol, or null if not found.</summary>
+        public (int index, int szDecimals)? GetAssetIndex(string symbol) =>
+            _assetIndexes.TryGetValue(symbol, out var v) ? v : null;
 
         // ── Public endpoints ──────────────────────────────────────────────────
 
@@ -351,6 +389,119 @@ namespace HyperliquidScanner.Services
             // any wallet's state by address. Signing is only needed for
             // order placement and withdrawals.
             return await PostInfoAsync(payload, ct);
+        }
+
+        // ── Order placement (requires private key) ────────────────────────────
+
+        /// <summary>
+        /// Places a reduce-only limit order to close (part of) a position.
+        /// For a long close: isBuy=false, price slightly below mark.
+        /// For a short close: isBuy=true, price slightly above mark.
+        /// Returns the response JToken or null on failure.
+        /// </summary>
+        public async Task<(bool ok, string message)> PlaceLimitCloseAsync(
+            string symbol, bool isBuy, decimal price, decimal size,
+            int szDecimals, CancellationToken ct = default)
+        {
+            return await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
+        }
+
+        /// <summary>
+        /// Places a reduce-only IOC (Immediate-or-Cancel) order — effectively a market close.
+        /// Uses an aggressive price (5% through the market) to ensure fill.
+        /// </summary>
+        public async Task<(bool ok, string message)> PlaceMarketCloseAsync(
+            string symbol, bool isBuy, decimal markPrice, decimal size,
+            int szDecimals, CancellationToken ct = default)
+        {
+            // Aggressive price: 5% past mark to ensure immediate fill
+            var aggressivePrice = isBuy
+                ? markPrice * 1.05m   // buying to close a short — price above mark
+                : markPrice * 0.95m;  // selling to close a long  — price below mark
+
+            return await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size, szDecimals, "Ioc", ct);
+        }
+
+        private async Task<(bool ok, string message)> PlaceOrderAsync(
+            string symbol, bool isBuy, decimal price, decimal size,
+            int szDecimals, string tif, CancellationToken ct)
+        {
+            if (!_config.HasPrivateKey)
+                return (false, "No private key configured — cannot place orders.");
+
+            var assetInfo = GetAssetIndex(symbol);
+            if (assetInfo == null)
+                return (false, $"Asset index not found for {symbol} — run InitialiseAssetIndexesAsync first.");
+
+            var (assetIndex, _) = assetInfo.Value;
+            var nonce           = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            // Format price and size to appropriate precision
+            var priceStr = FormatDecimal(price, 5);  // HL uses up to 5 sig figs for price
+            var sizeStr  = size.ToString($"F{szDecimals}",
+                              System.Globalization.CultureInfo.InvariantCulture);
+
+            try
+            {
+                // Serialise action to msgpack
+                var actionBytes = HyperliquidSigner.SerializeLimitOrder(
+                    assetIndex, isBuy, priceStr, sizeStr, reduceOnly: true, tif);
+
+                // Sign
+                var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+
+                // Build request
+                var action = new
+                {
+                    type     = "order",
+                    orders   = new[]
+                    {
+                        new
+                        {
+                            a = assetIndex,
+                            b = isBuy,
+                            p = priceStr,
+                            s = sizeStr,
+                            r = true,  // reduceOnly
+                            t = new { limit = new { tif } }
+                        }
+                    },
+                    grouping = "na"
+                };
+
+                var body = new
+                {
+                    action,
+                    nonce,
+                    signature = new { r, s, v }
+                };
+
+                var json     = JsonConvert.SerializeObject(body);
+                var content  = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await _http.PostAsync("/exchange", content, ct);
+                var respBody = await response.Content.ReadAsStringAsync(ct);
+
+                var parsed = JToken.Parse(respBody);
+                var status = parsed["status"]?.Value<string>();
+
+                if (status == "ok")
+                    return (true, $"Order placed: {(isBuy ? "Buy" : "Sell")} {sizeStr} {symbol} @ {priceStr}");
+
+                var error = parsed["response"]?["data"]?.ToString() ?? respBody;
+                return (false, $"Order rejected: {error}");
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Order error: {ex.Message}");
+            }
+        }
+
+        private static string FormatDecimal(decimal value, int sigFigs)
+        {
+            if (value == 0) return "0";
+            var magnitude = (int)Math.Floor(Math.Log10((double)Math.Abs(value)));
+            var decimals  = Math.Max(0, sigFigs - 1 - magnitude);
+            return value.ToString($"F{decimals}", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         // ── Internals ─────────────────────────────────────────────────────────

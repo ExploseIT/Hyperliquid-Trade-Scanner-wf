@@ -5,13 +5,13 @@ namespace HyperliquidScanner.Forms
 {
     /// <summary>
     /// Bottom panel showing open Hyperliquid positions with live PnL.
-    /// Polls the clearinghouseState API every 5 seconds.
-    /// Read-only in Phase 1 — risk management (auto SL/TP) added in Phase 2.
+    /// Polls every 5 seconds. Feeds PositionMonitor for auto SL/TP when enabled.
     /// </summary>
     public class PositionsPanel : Panel
     {
         private readonly HyperliquidClient _client;
         private readonly AppConfig         _config;
+        private readonly PositionMonitor?  _monitor;
 
         private DataGridView                _grid    = null!;
         private Label                       _header  = null!;
@@ -47,10 +47,19 @@ namespace HyperliquidScanner.Forms
             return match ?? coin;
         }
 
-        public PositionsPanel(HyperliquidClient client, AppConfig config)
+        public PositionsPanel(HyperliquidClient client, AppConfig config,
+                              PositionMonitor? monitor = null)
         {
-            _client = client;
-            _config = config;
+            _client  = client;
+            _config  = config;
+            _monitor = monitor;
+
+            if (_monitor != null)
+            {
+                _monitor.OrderPlaced += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, true));
+                _monitor.OrderFailed += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, false));
+                _monitor.SlWarning   += (sym, pnl) => BeginInvoke(() => HighlightSlWarning(sym));
+            }
 
             Dock      = DockStyle.Bottom;
             Height    = 155;
@@ -104,16 +113,19 @@ namespace HyperliquidScanner.Forms
             _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.Silver;
 
             _grid.Columns.AddRange(
-                new DataGridViewTextBoxColumn { HeaderText = "Symbol",    Name = "Symbol",   MinimumWidth = 80  },
-                new DataGridViewTextBoxColumn { HeaderText = "Side",      Name = "Side",     MinimumWidth = 60  },
-                new DataGridViewTextBoxColumn { HeaderText = "Size",      Name = "Size",     MinimumWidth = 80  },
-                new DataGridViewTextBoxColumn { HeaderText = "Entry",     Name = "Entry",    MinimumWidth = 100 },
-                new DataGridViewTextBoxColumn { HeaderText = "Mark",      Name = "Mark",     MinimumWidth = 100 },
-                new DataGridViewTextBoxColumn { HeaderText = "PnL $",     Name = "PnlUsd",   MinimumWidth = 90  },
-                new DataGridViewTextBoxColumn { HeaderText = "PnL %",     Name = "PnlPct",   MinimumWidth = 75  },
-                new DataGridViewTextBoxColumn { HeaderText = "Liq Price", Name = "LiqPrice", MinimumWidth = 100 },
-                new DataGridViewTextBoxColumn { HeaderText = "Leverage",  Name = "Leverage", MinimumWidth = 90  },
-                new DataGridViewTextBoxColumn { HeaderText = "Margin",    Name = "Margin",   MinimumWidth = 90  }
+                new DataGridViewTextBoxColumn { HeaderText = "Symbol",   Name = "Symbol",   MinimumWidth = 80 },
+                new DataGridViewTextBoxColumn { HeaderText = "Side",     Name = "Side",     MinimumWidth = 55 },
+                new DataGridViewTextBoxColumn { HeaderText = "Size",     Name = "Size",     MinimumWidth = 70 },
+                new DataGridViewTextBoxColumn { HeaderText = "Entry",    Name = "Entry",    MinimumWidth = 75 },
+                new DataGridViewTextBoxColumn { HeaderText = "Mark",     Name = "Mark",     MinimumWidth = 75 },
+                new DataGridViewTextBoxColumn { HeaderText = "PnL$",     Name = "PnlUsd",   MinimumWidth = 70 },
+                new DataGridViewTextBoxColumn { HeaderText = "ROE%",     Name = "PnlPct",   MinimumWidth = 70 },
+                new DataGridViewTextBoxColumn { HeaderText = "Liq",      Name = "LiqPrice", MinimumWidth = 75 },
+                new DataGridViewTextBoxColumn { HeaderText = "Leverage", Name = "Leverage", MinimumWidth = 85 },
+                new DataGridViewTextBoxColumn { HeaderText = "Margin",   Name = "Margin",   MinimumWidth = 70 },
+                new DataGridViewTextBoxColumn { HeaderText = "SL Price", Name = "Sl",       MinimumWidth = 80 },
+                new DataGridViewTextBoxColumn { HeaderText = "TP Price", Name = "Tp",       MinimumWidth = 80 },
+                new DataGridViewTextBoxColumn { HeaderText = "Status",   Name = "Status",   MinimumWidth = 160 }
             );
 
             foreach (DataGridViewColumn col in _grid.Columns)
@@ -132,6 +144,10 @@ namespace HyperliquidScanner.Forms
                 var positions = await _client.GetPositionsAsync(ct);
                 _positions = positions;
 
+                // Run risk monitor checks (fires SL/TP orders if thresholds crossed)
+                if (_monitor != null)
+                    await _monitor.CheckPositionsAsync(positions, ct);
+
                 if (!IsHandleCreated || IsDisposed) return;
                 BeginInvoke(() =>
                 {
@@ -143,6 +159,33 @@ namespace HyperliquidScanner.Forms
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[PositionsPanel] refresh error: {ex.Message}");
+            }
+        }
+
+        private void ShowOrderResult(string symbol, string message, bool success)
+        {
+            // Flash the matching row and update its status cell
+            foreach (DataGridViewRow row in _grid.Rows)
+            {
+                if (row.Tag is PositionInfo p && p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    row.Cells["Status"].Value = success ? "🟢 Order placed" : "🔴 Order failed";
+                    row.DefaultCellStyle.BackColor = success
+                        ? Color.FromArgb(10, 40, 20)
+                        : Color.FromArgb(50, 10, 10);
+                }
+            }
+        }
+
+        private void HighlightSlWarning(string symbol)
+        {
+            foreach (DataGridViewRow row in _grid.Rows)
+            {
+                if (row.Tag is PositionInfo p && p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    row.DefaultCellStyle.BackColor = Color.FromArgb(50, 40, 10); // amber warning
+                    row.Cells["Status"].Value = "⚠ Near SL";
+                }
             }
         }
 
@@ -162,11 +205,49 @@ namespace HyperliquidScanner.Forms
             {
                 p.Symbol = ResolveSymbol(p.Symbol); // resolve HIP-3 prefix if needed
 
+                var riskCfg  = _config.GetRiskConfig(p.Symbol);
                 var pnlSign  = p.UnrealisedPnl >= 0 ? "+" : "";
                 var pctSign  = p.PnlPercent    >= 0 ? "+" : "";
                 var liqText  = p.LiquidationPrice.HasValue
                              ? p.LiquidationPrice.Value.ToString("G6")
                              : "–";
+
+                // SL/TP trigger prices: pnl_at_threshold = ±decimal × margin
+                // For long:  slPrice = entry - (slDecimal × margin / size)
+                // For short: slPrice = entry + (slDecimal × margin / size)
+                string slText, tpText;
+                if (p.Size > 0 && p.MarginUsed > 0 && (riskCfg.SlEnabled || riskCfg.TpEnabled))
+                {
+                    var pnlPerUnit = p.MarginUsed / p.Size;
+                    var slPrice    = p.IsLong
+                        ? p.EntryPrice - riskCfg.SlDecimal * pnlPerUnit
+                        : p.EntryPrice + riskCfg.SlDecimal * pnlPerUnit;
+                    var tpPrice    = p.IsLong
+                        ? p.EntryPrice + riskCfg.TpDecimal * pnlPerUnit
+                        : p.EntryPrice - riskCfg.TpDecimal * pnlPerUnit;
+                    slText = riskCfg.SlEnabled ? slPrice.ToString("G6") : "–";
+                    tpText = riskCfg.TpEnabled ? tpPrice.ToString("G6") : "–";
+                }
+                else
+                {
+                    slText = "–";
+                    tpText = "–";
+                }
+
+                var status   = _monitor?.GetStatus(p.Symbol) ?? SymbolRiskStatus.Normal;
+                var rsiSlope = _monitor?.GetRsiSlope(p.Symbol);
+                var slopeStr = rsiSlope.HasValue && (riskCfg.SlEnabled || riskCfg.TpEnabled)
+                    ? $" RSI↕{rsiSlope.Value:F1}"
+                    : string.Empty;
+                var activeFlags = (riskCfg.SlEnabled ? "SL" : "") +
+                                  (riskCfg.SlEnabled && riskCfg.TpEnabled ? "+" : "") +
+                                  (riskCfg.TpEnabled ? "TP" : "");
+                var statusText = status switch
+                {
+                    SymbolRiskStatus.SlFired => "🔴 SL fired",
+                    SymbolRiskStatus.TpFired => "🟢 TP fired",
+                    _ => activeFlags.Length > 0 ? $"{activeFlags}{slopeStr}" : "–"
+                };
 
                 var idx = _grid.Rows.Add(
                     p.Symbol,
@@ -178,7 +259,10 @@ namespace HyperliquidScanner.Forms
                     $"{pctSign}{p.PnlPercent * 100:F2}%",
                     liqText,
                     p.LeverageLabel,
-                    $"{p.MarginUsed:F2}"
+                    $"{p.MarginUsed:F2}",
+                    slText,
+                    tpText,
+                    statusText
                 );
 
                 _grid.Rows[idx].Tag = p;
@@ -212,6 +296,20 @@ namespace HyperliquidScanner.Forms
             // Liq price — amber warning
             if (col == "LiqPrice" && p.LiquidationPrice.HasValue)
                 e.CellStyle.ForeColor = Color.FromArgb(255, 180, 50);
+
+            // SL/TP threshold columns — muted grey
+            if (col is "Sl" or "Tp")
+                e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
+
+            // Status column
+            if (col == "Status")
+            {
+                var val = e.Value?.ToString() ?? "";
+                e.CellStyle.ForeColor = val.Contains("SL fired") ? Color.FromArgb(220, 80,  80)
+                                      : val.Contains("TP fired") ? Color.FromArgb(80,  220, 130)
+                                      : val.Contains("Near SL")  ? Color.FromArgb(255, 180, 50)
+                                      : Color.FromArgb(100, 100, 100);
+            }
         }
 
         protected override void Dispose(bool disposing)

@@ -56,10 +56,7 @@ namespace HyperliquidScanner.Models
         /// Per-symbol SL/TP thresholds. Use symbol = "DEFAULT" as fallback.
         /// </summary>
         [JsonProperty("symbolInfo")]
-        public List<SymbolRiskConfig> SymbolInfo { get; set; } = new()
-        {
-            new SymbolRiskConfig { Symbol = "DEFAULT", SlDecimal = 0.025m, TpDecimal = 0.05m, TpSizeDecimal = 0.5m }
-        };
+        public List<SymbolRiskConfig> SymbolInfo { get; set; } = new();
 
         /// <summary>Returns the risk config for a symbol, falling back to DEFAULT.</summary>
         public SymbolRiskConfig GetRiskConfig(string symbol) =>
