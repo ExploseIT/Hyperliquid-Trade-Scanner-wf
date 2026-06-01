@@ -30,9 +30,13 @@ namespace HyperliquidScanner.Services
             public int     SlBelowPollCount  { get; set; }  // consecutive polls below SL
 
             // Trailing stop state
-            public decimal HighWaterMarkPct  { get; set; } = decimal.MinValue; // peak ROE seen
-            public bool    TrailingActive    { get; set; }  // min profit level reached
+            public decimal HighWaterMarkPct  { get; set; } = decimal.MinValue;
+            public bool    TrailingActive    { get; set; }
             public bool    TrailingFired     { get; set; }
+
+            // DCA detection — reset state when position size or entry price changes
+            public decimal LastKnownSize     { get; set; }
+            public decimal LastKnownEntry    { get; set; }
         }
 
         private readonly Dictionary<string, SymbolState>     _states
@@ -86,7 +90,9 @@ namespace HyperliquidScanner.Services
                     {
                         InitialPnlPct  = pos.PnlPercent,
                         HasBeenAboveSl = pos.PnlPercent > -riskConfig.SlDecimal,
-                        HasBeenBelowTp = pos.PnlPercent < riskConfig.TpDecimal
+                        HasBeenBelowTp = pos.PnlPercent < riskConfig.TpDecimal,
+                        LastKnownSize  = pos.Size,
+                        LastKnownEntry = pos.EntryPrice
                     };
                     _states[pos.Symbol] = state;
 
@@ -95,6 +101,38 @@ namespace HyperliquidScanner.Services
                             $"[Monitor] {pos.Symbol} already past SL at startup " +
                             $"({pos.PnlPercent:P1}) — skipping auto-SL.");
                     continue;
+                }
+
+                // DCA detection — size increased or entry price changed → reset state
+                // so thresholds recalculate against the new combined position
+                bool isDca = pos.Size > state.LastKnownSize * 1.005m   // size grew by >0.5%
+                          || Math.Abs(pos.EntryPrice - state.LastKnownEntry) > pos.EntryPrice * 0.0005m; // entry moved
+
+                if (isDca)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Monitor] {pos.Symbol} DCA detected " +
+                        $"(size {state.LastKnownSize}→{pos.Size}, " +
+                        $"entry {state.LastKnownEntry}→{pos.EntryPrice}) — resetting state.");
+
+                    state.SlFired          = false;
+                    state.TpFired          = false;
+                    state.SlBelowPollCount = 0;
+                    state.HasBeenAboveSl   = pos.PnlPercent > -riskConfig.SlDecimal;
+                    state.HasBeenBelowTp   = pos.PnlPercent < riskConfig.TpDecimal;
+                    state.TrailingActive   = false;
+                    state.TrailingFired    = false;
+                    state.HighWaterMarkPct = decimal.MinValue;
+                    state.InitialPnlPct    = pos.PnlPercent;
+                    state.LastKnownSize    = pos.Size;
+                    state.LastKnownEntry   = pos.EntryPrice;
+                    // Don't skip — process this observation with fresh state
+                }
+                else
+                {
+                    // Update for next cycle
+                    state.LastKnownSize  = pos.Size;
+                    state.LastKnownEntry = pos.EntryPrice;
                 }
 
                 // ── SL check ─────────────────────────────────────────────────
