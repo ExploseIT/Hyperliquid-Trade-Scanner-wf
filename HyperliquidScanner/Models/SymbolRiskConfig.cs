@@ -44,5 +44,28 @@ namespace HyperliquidScanner.Models
         /// <summary>Enable automatic take profit for this symbol.</summary>
         [JsonProperty("tp_enabled")]
         public bool TpEnabled { get; set; } = false;
+
+        /// <summary>Enable app-side trailing stop for this symbol.</summary>
+        [JsonProperty("trailing_enabled")]
+        public bool TrailingEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Minimum ROE% the position must reach before the trailing stop activates.
+        /// Prevents trailing from firing at a loss if the position peaks at a low level.
+        /// e.g. 0.10 = trailing only activates after +10% ROE.
+        /// </summary>
+        [JsonProperty("trailingMinProfitDecimal")]
+        public decimal TrailingMinProfitDecimal { get; set; } = 0.10m;
+
+        /// <summary>
+        /// How much the ROE% must retrace from its peak to trigger the trailing stop.
+        /// e.g. 0.08 = fires if ROE drops 8% from its high-water mark.
+        /// </summary>
+        [JsonProperty("trailingRetraceDecimal")]
+        public decimal TrailingRetraceDecimal { get; set; } = 0.08m;
+
+        /// <summary>Fraction of position to close on trailing stop fire. 1.0 = close all.</summary>
+        [JsonProperty("trailingSizeDecimal")]
+        public decimal TrailingSizeDecimal { get; set; } = 1.0m;
     }
 }

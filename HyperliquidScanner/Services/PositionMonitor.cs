@@ -28,6 +28,11 @@ namespace HyperliquidScanner.Services
             public bool    TpFired           { get; set; }
             public decimal InitialPnlPct     { get; set; }
             public int     SlBelowPollCount  { get; set; }  // consecutive polls below SL
+
+            // Trailing stop state
+            public decimal HighWaterMarkPct  { get; set; } = decimal.MinValue; // peak ROE seen
+            public bool    TrailingActive    { get; set; }  // min profit level reached
+            public bool    TrailingFired     { get; set; }
         }
 
         private readonly Dictionary<string, SymbolState>     _states
@@ -145,6 +150,43 @@ namespace HyperliquidScanner.Services
                         await TriggerTpAsync(pos, riskConfig, label, ct);
                 }
 
+                // ── Trailing stop check ──────────────────────────────────────
+                if (riskConfig.TrailingEnabled && !state.TrailingFired)
+                {
+                    // Update high-water mark
+                    if (pos.PnlPercent > state.HighWaterMarkPct)
+                        state.HighWaterMarkPct = pos.PnlPercent;
+
+                    // Activate once min profit level reached
+                    if (!state.TrailingActive
+                        && pos.PnlPercent >= riskConfig.TrailingMinProfitDecimal)
+                    {
+                        state.TrailingActive = true;
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[Monitor] {pos.Symbol} trailing ACTIVATED at {pos.PnlPercent:P1} ROE");
+                    }
+
+                    // Fire if retrace from peak exceeds threshold
+                    if (state.TrailingActive && state.HighWaterMarkPct > decimal.MinValue)
+                    {
+                        var retraceFromPeak = state.HighWaterMarkPct - pos.PnlPercent;
+                        if (retraceFromPeak >= riskConfig.TrailingRetraceDecimal)
+                        {
+                            state.TrailingFired = true;
+                            var label = $"{pos.Symbol} trailing stop  " +
+                                        $"peak {state.HighWaterMarkPct:P1}  " +
+                                        $"now {pos.PnlPercent:P1}  " +
+                                        $"retrace {retraceFromPeak:P1}";
+
+                            if (isHip3)
+                                OrderFailed?.Invoke(pos.Symbol,
+                                    $"🔒 Trailing triggered for {label} — HIP-3, manual close required");
+                            else
+                                await TriggerTrailingAsync(pos, riskConfig, label, ct);
+                        }
+                    }
+                }
+
                 // Update state flags
                 if (pos.PnlPercent > -riskConfig.SlDecimal) state.HasBeenAboveSl = true;
                 if (pos.PnlPercent < riskConfig.TpDecimal)  state.HasBeenBelowTp = true;
@@ -170,14 +212,27 @@ namespace HyperliquidScanner.Services
         public SymbolRiskStatus GetStatus(string symbol)
         {
             if (!_states.TryGetValue(symbol, out var state)) return SymbolRiskStatus.Normal;
-            if (state.SlFired) return SymbolRiskStatus.SlFired;
-            if (state.TpFired) return SymbolRiskStatus.TpFired;
+            if (state.SlFired)      return SymbolRiskStatus.SlFired;
+            if (state.TpFired)      return SymbolRiskStatus.TpFired;
+            if (state.TrailingFired) return SymbolRiskStatus.TrailingFired;
             return SymbolRiskStatus.Normal;
         }
 
         /// <summary>Returns the latest RSI slope for a symbol (for display in positions panel).</summary>
         public decimal GetRsiSlope(string symbol) =>
             _rsiSlopes.GetValueOrDefault(symbol, 0m);
+
+        /// <summary>
+        /// Returns trailing stop display info: (highWaterMark, isActive, isFired).
+        /// Returns null if trailing is not enabled for this symbol.
+        /// </summary>
+        public (decimal hwm, bool active, bool fired)? GetTrailingInfo(string symbol)
+        {
+            if (!_states.TryGetValue(symbol, out var state)) return null;
+            var cfg = _config.GetRiskConfig(symbol);
+            if (!cfg.TrailingEnabled) return null;
+            return (state.HighWaterMarkPct, state.TrailingActive, state.TrailingFired);
+        }
 
         // ── Mini-scan: fetch RSI slope for open positions ─────────────────────
 
@@ -279,7 +334,38 @@ namespace HyperliquidScanner.Services
             else
                 OrderFailed?.Invoke(pos.Symbol, $"TP FAILED for {label}: {msg}");
         }
+
+        private async Task TriggerTrailingAsync(
+            PositionInfo pos, SymbolRiskConfig cfg, string label, CancellationToken ct)
+        {
+            var assetInfo = _client.GetAssetIndex(pos.Symbol);
+            if (assetInfo == null)
+            {
+                OrderFailed?.Invoke(pos.Symbol, $"Trailing: asset index unknown for {pos.Symbol}");
+                return;
+            }
+
+            var (_, szDec) = assetInfo.Value;
+            var isBuy      = !pos.IsLong;
+
+            var closeSize = Math.Round(pos.Size * cfg.TrailingSizeDecimal,
+                szDec, MidpointRounding.ToZero);
+            if (closeSize <= 0)
+            {
+                OrderFailed?.Invoke(pos.Symbol, $"Trailing: close size is 0 for {pos.Symbol}");
+                return;
+            }
+
+            // Use IOC at aggressive price for trailing — speed matters here
+            var (ok, msg) = await _client.PlaceMarketCloseAsync(
+                pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
+
+            if (ok)
+                OrderPlaced?.Invoke(pos.Symbol, $"🔒 Trailing {label} — closed {cfg.TrailingSizeDecimal:P0}");
+            else
+                OrderFailed?.Invoke(pos.Symbol, $"Trailing FAILED for {label}: {msg}");
+        }
     }
 
-    public enum SymbolRiskStatus { Normal, SlFired, TpFired }
+    public enum SymbolRiskStatus { Normal, SlFired, TpFired, TrailingFired }
 }

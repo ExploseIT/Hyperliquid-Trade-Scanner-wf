@@ -125,6 +125,7 @@ namespace HyperliquidScanner.Forms
                 new DataGridViewTextBoxColumn { HeaderText = "Margin",   Name = "Margin",   MinimumWidth = 70 },
                 new DataGridViewTextBoxColumn { HeaderText = "SL Price", Name = "Sl",       MinimumWidth = 80 },
                 new DataGridViewTextBoxColumn { HeaderText = "TP Price", Name = "Tp",       MinimumWidth = 80 },
+                new DataGridViewTextBoxColumn { HeaderText = "Trail",    Name = "Trail",    MinimumWidth = 120 },
                 new DataGridViewTextBoxColumn { HeaderText = "Status",   Name = "Status",   MinimumWidth = 160 }
             );
 
@@ -244,10 +245,26 @@ namespace HyperliquidScanner.Forms
                                   (riskCfg.TpEnabled ? "TP" : "");
                 var statusText = status switch
                 {
-                    SymbolRiskStatus.SlFired => "🔴 SL fired",
-                    SymbolRiskStatus.TpFired => "🟢 TP fired",
+                    SymbolRiskStatus.SlFired      => "🔴 SL fired",
+                    SymbolRiskStatus.TpFired      => "🟢 TP fired",
+                    SymbolRiskStatus.TrailingFired => "🔒 Trail fired",
                     _ => activeFlags.Length > 0 ? $"{activeFlags}{slopeStr}" : "–"
                 };
+
+                // Trail column: show high-water mark and activation state
+                string trailText = "–";
+                if (riskCfg.TrailingEnabled)
+                {
+                    var trail = _monitor?.GetTrailingInfo(p.Symbol);
+                    if (trail == null)
+                        trailText = $"Min {riskCfg.TrailingMinProfitDecimal * 100:F0}%";
+                    else if (trail.Value.fired)
+                        trailText = "🔒 Fired";
+                    else if (trail.Value.active && trail.Value.hwm > decimal.MinValue)
+                        trailText = $"Peak {trail.Value.hwm * 100:F1}%";
+                    else
+                        trailText = $"Wait {riskCfg.TrailingMinProfitDecimal * 100:F0}%";
+                }
 
                 var idx = _grid.Rows.Add(
                     p.Symbol,
@@ -262,6 +279,7 @@ namespace HyperliquidScanner.Forms
                     $"{p.MarginUsed:F2}",
                     slText,
                     tpText,
+                    trailText,
                     statusText
                 );
 
@@ -301,13 +319,23 @@ namespace HyperliquidScanner.Forms
             if (col is "Sl" or "Tp")
                 e.CellStyle.ForeColor = Color.FromArgb(140, 140, 140);
 
+            // Trail column
+            if (col == "Trail")
+            {
+                var val = e.Value?.ToString() ?? "–";
+                e.CellStyle.ForeColor = val.StartsWith("Peak")  ? Color.FromArgb(80, 220, 130)   // green — trailing active
+                                      : val.StartsWith("🔒")    ? Color.FromArgb(255, 200, 60)   // gold  — fired
+                                      : Color.FromArgb(100, 100, 100);                            // grey  — waiting
+            }
+
             // Status column
             if (col == "Status")
             {
                 var val = e.Value?.ToString() ?? "";
-                e.CellStyle.ForeColor = val.Contains("SL fired") ? Color.FromArgb(220, 80,  80)
-                                      : val.Contains("TP fired") ? Color.FromArgb(80,  220, 130)
-                                      : val.Contains("Near SL")  ? Color.FromArgb(255, 180, 50)
+                e.CellStyle.ForeColor = val.Contains("SL fired")    ? Color.FromArgb(220, 80,  80)
+                                      : val.Contains("TP fired")    ? Color.FromArgb(80,  220, 130)
+                                      : val.Contains("Trail fired") ? Color.FromArgb(255, 200, 60)
+                                      : val.Contains("Near SL")     ? Color.FromArgb(255, 180, 50)
                                       : Color.FromArgb(100, 100, 100);
             }
         }
