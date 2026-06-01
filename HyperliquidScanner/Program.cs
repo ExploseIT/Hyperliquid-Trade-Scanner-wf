@@ -14,16 +14,17 @@ namespace HyperliquidScanner
 
             try
             {
-                var config  = ConfigLoader.Load();
-                var client  = new HyperliquidClient(config);
-                var scanner = new ScannerService(client, config);
+                var config      = ConfigLoader.Load();
+                var appSettings = AppSettingsLoader.Load();
+                var client      = new HyperliquidClient(config);
+                var scanner     = new ScannerService(client, config);
 
                 // Coinglass panel is optional — only shown if API key is configured
                 CoinglassClient? coinglass = config.HasCoinglassKey
                     ? new CoinglassClient(config)
                     : null;
 
-                Application.Run(new MainForm(config, client, scanner, coinglass));
+                Application.Run(new MainForm(config, appSettings, client, scanner, coinglass));
             }
             catch (FileNotFoundException ex)
             {

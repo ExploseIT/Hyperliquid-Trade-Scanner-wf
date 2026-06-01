@@ -1,5 +1,6 @@
 using HyperliquidScanner.Models;
 using HyperliquidScanner.Services;
+using HyperliquidScanner.Utils;
 
 namespace HyperliquidScanner.Forms
 {
@@ -7,9 +8,14 @@ namespace HyperliquidScanner.Forms
     {
         // Services
         private readonly AppConfig         _config;
+        private readonly AppSettings       _appSettings;
         private readonly HyperliquidClient _client;
         private readonly ScannerService    _scanner;
         private readonly CoinglassClient?  _coinglass;
+
+        // Custom alert sounds (null = fall back to system sound)
+        private readonly System.Media.SoundPlayer? _squeezeSound;
+        private readonly System.Media.SoundPlayer? _cascadeSound;
 
         // UI Controls
         private ComboBox          _timeframeCombo   = null!;
@@ -36,13 +42,21 @@ namespace HyperliquidScanner.Forms
         private Dictionary<string, LiquidationAggregator.SymbolSummary> _liqSummaries
             = new(StringComparer.OrdinalIgnoreCase);
 
-        public MainForm(AppConfig config, HyperliquidClient client,
+        public MainForm(AppConfig config, AppSettings appSettings, HyperliquidClient client,
                         ScannerService scanner, CoinglassClient? coinglass = null)
         {
-            _config    = config;
-            _client    = client;
-            _scanner   = scanner;
-            _coinglass = coinglass;
+            _config      = config;
+            _appSettings = appSettings;
+            _client      = client;
+            _scanner     = scanner;
+            _coinglass   = coinglass;
+
+            // Load custom alert sounds — fall back to system sounds if files not found
+            var squeezePath = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
+            var cascadePath = AppSettingsLoader.ResolveSoundPath(_appSettings.CascadeSoundFile);
+            _squeezeSound = squeezePath != null ? new System.Media.SoundPlayer(squeezePath) : null;
+            _cascadeSound = cascadePath != null ? new System.Media.SoundPlayer(cascadePath) : null;
+
 
             // Start the OKX live liquidation feed + aggregator (free public WebSocket)
             if (coinglass != null)
@@ -644,12 +658,19 @@ namespace HyperliquidScanner.Forms
         private void OnBurstAlert(LiquidationAggregator.BurstAlert burst)
         {
             // Sound — different tone for squeeze vs cascade
+            // Uses custom wav files from appsettings.json; falls back to system sounds if not found
             try
             {
                 if (burst.Direction == LiquidationAggregator.SqueezeType.ShortSqueeze)
-                    System.Media.SystemSounds.Exclamation.Play();
+                {
+                    if (_squeezeSound != null) _squeezeSound.Play();
+                    else System.Media.SystemSounds.Exclamation.Play();
+                }
                 else
-                    System.Media.SystemSounds.Hand.Play();
+                {
+                    if (_cascadeSound != null) _cascadeSound.Play();
+                    else System.Media.SystemSounds.Hand.Play();
+                }
             }
             catch { /* sound not critical */ }
 
