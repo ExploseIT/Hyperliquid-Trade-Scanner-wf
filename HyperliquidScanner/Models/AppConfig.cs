@@ -45,6 +45,28 @@ namespace HyperliquidScanner.Models
         [JsonProperty("hip3Dexes")]
         public List<string> Hip3Dexes { get; set; } = new() { "xyz" };
 
+        /// <summary>
+        /// Master switch for automatic stop loss and take profit management.
+        /// When false, positions are monitored and displayed but no orders are placed.
+        /// </summary>
+        [JsonProperty("autoRiskManagement")]
+        public bool AutoRiskManagement { get; set; } = false;
+
+        /// <summary>
+        /// Per-symbol SL/TP thresholds. Use symbol = "DEFAULT" as fallback.
+        /// </summary>
+        [JsonProperty("symbolInfo")]
+        public List<SymbolRiskConfig> SymbolInfo { get; set; } = new()
+        {
+            new SymbolRiskConfig { Symbol = "DEFAULT", SlDecimal = 0.025m, TpDecimal = 0.05m, TpSizeDecimal = 0.5m }
+        };
+
+        /// <summary>Returns the risk config for a symbol, falling back to DEFAULT.</summary>
+        public SymbolRiskConfig GetRiskConfig(string symbol) =>
+            SymbolInfo.FirstOrDefault(s => s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+            ?? SymbolInfo.FirstOrDefault(s => s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase))
+            ?? new SymbolRiskConfig();
+
         public bool HasPrivateKey => !string.IsNullOrWhiteSpace(PrivateKey);
     }
 }

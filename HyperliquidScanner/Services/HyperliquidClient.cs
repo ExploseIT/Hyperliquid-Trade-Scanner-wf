@@ -1,6 +1,7 @@
 using HyperliquidScanner.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
 
 namespace HyperliquidScanner.Services
 {
@@ -239,6 +240,94 @@ namespace HyperliquidScanner.Services
         private static decimal ParseDecimal(JToken? token) =>
             decimal.TryParse(token?.Value<string>(), System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0m;
+
+        // ── Position data ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns all open perpetual positions for the configured wallet address.
+        /// Uses the public clearinghouseState endpoint — wallet address only, no signing needed.
+        /// Returns empty list if wallet address is not configured or on any error.
+        /// </summary>
+        public async Task<List<PositionInfo>> GetPositionsAsync(CancellationToken ct = default)
+        {
+            var positions = new List<PositionInfo>();
+            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return positions;
+
+            // Fetch main HL positions + each configured HIP-3 dex separately
+            var dexesToFetch = new List<string?> { null }; // null = main HL universe
+            dexesToFetch.AddRange(_config.Hip3Dexes.Where(d => !string.IsNullOrWhiteSpace(d)));
+
+            foreach (var dex in dexesToFetch)
+            {
+                try
+                {
+                    object payload = dex == null
+                        ? new { type = "clearinghouseState", user = _config.WalletAddress }
+                        : (object)new { type = "clearinghouseState", user = _config.WalletAddress, dex };
+
+                    var response       = await PostInfoAsync(payload, ct);
+                    var assetPositions = response["assetPositions"] as JArray;
+                    if (assetPositions == null) continue;
+
+                    foreach (var item in assetPositions)
+                    {
+                        var pos = item["position"];
+                        if (pos == null) continue;
+
+                        var sziStr = pos["szi"]?.Value<string>() ?? "0";
+                        if (!decimal.TryParse(sziStr, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var szi)
+                            || szi == 0m) continue;
+
+                        var entryPx   = ParseDecimal(pos["entryPx"]);
+                        var posVal    = ParseDecimal(pos["positionValue"]);
+                        var pnl       = ParseDecimal(pos["unrealizedPnl"]);
+                        var marginUsd = ParseDecimal(pos["marginUsed"]);
+                        var absSize   = Math.Abs(szi);
+                        var markPx    = absSize > 0 ? posVal / absSize : 0m;
+                        // ROE: PnL as % of margin (matches Hyperliquid UI convention)
+                        var pnlPct    = marginUsd > 0 ? pnl / marginUsd : 0m;
+
+                        var levObj  = pos["leverage"];
+                        var levVal  = levObj?["value"]?.Value<int>() ?? 1;
+                        var levType = levObj?["type"]?.Value<string>() ?? "cross";
+
+                        decimal? liqPx = null;
+                        var liqStr = pos["liquidationPx"]?.Value<string>();
+                        if (!string.IsNullOrEmpty(liqStr) && liqStr != "null" &&
+                            decimal.TryParse(liqStr, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var liq))
+                            liqPx = liq;
+
+                        // Prefix HIP-3 asset names so they match the scanner format (e.g. "AMD" → "xyz:AMD")
+                        var coinName = pos["coin"]?.Value<string>() ?? string.Empty;
+                        if (dex != null && !coinName.Contains(':'))
+                            coinName = $"{dex}:{coinName}";
+
+                        positions.Add(new PositionInfo
+                        {
+                            Symbol           = coinName,
+                            IsLong           = szi > 0,
+                            Size             = absSize,
+                            EntryPrice       = entryPx,
+                            MarkPrice        = markPx,
+                            UnrealisedPnl    = pnl,
+                            PnlPercent       = pnlPct,
+                            LiquidationPrice = liqPx,
+                            Leverage         = levVal,
+                            LeverageType     = levType,
+                            MarginUsed       = marginUsd
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Positions] {dex ?? "main"} fetch failed: {ex.Message}");
+                }
+            }
+
+            return positions;
+        }
 
         // ── Private endpoint (requires signing) ───────────────────────────────
 

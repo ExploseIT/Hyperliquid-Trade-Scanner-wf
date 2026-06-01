@@ -31,6 +31,7 @@ namespace HyperliquidScanner.Forms
         private ComboBox          _autoRefreshCombo    = null!;
         private System.Windows.Forms.Timer _autoRefreshTimer = null!;
         private LiquidationPanel? _liqPanel;
+        private PositionsPanel?   _positionsPanel;
 
         private readonly BinanceLiquidationFeed?  _binanceFeed;
         private readonly BybitLiquidationFeed?   _bybitFeed;
@@ -340,7 +341,18 @@ namespace HyperliquidScanner.Forms
             _grid.SelectionChanged   += Grid_SelectionChanged;
             _grid.SortCompare        += Grid_SortCompare;
 
-            Controls.Add(_grid);
+            // Centre panel: asset grid on top, positions panel below
+            // (liquidation panel occupies the right side separately)
+            var centrePanel = new Panel { Dock = DockStyle.Fill };
+
+            _positionsPanel = new PositionsPanel(_client, _config);
+            centrePanel.Controls.Add(_grid);
+            centrePanel.Controls.Add(_positionsPanel);
+
+            // Trigger initial position load on startup
+            Load += async (_, _) => await _positionsPanel.RefreshAsync();
+
+            Controls.Add(centrePanel);
             Controls.Add(toolbar);
             Controls.Add(statusBar);
 
@@ -441,6 +453,9 @@ namespace HyperliquidScanner.Forms
                 var newResults = await _scanner.ScanAsync(apiValue, progress, _cts.Token);
                 _lastResults = newResults;
                 RefreshGrid();
+
+                // Pass known asset names to positions panel for HIP-3 symbol resolution
+                _positionsPanel?.SetKnownAssets(_lastResults.Select(r => r.Asset));
 
                 var bullishCount = _lastResults.Count(r => r.IsBullish);
                 var errorCount   = _lastResults.Count(r => r.BullishScore == -1);
