@@ -351,13 +351,35 @@ namespace HyperliquidScanner.Forms
             _grid.SelectionChanged   += Grid_SelectionChanged;
             _grid.SortCompare        += Grid_SortCompare;
 
-            // Centre panel: asset grid on top, positions panel below
+            // Centre panel: asset grid on top, positions panel below with draggable splitter
             // (liquidation panel occupies the right side separately)
-            var centrePanel = new Panel { Dock = DockStyle.Fill };
-
             _positionsPanel = new PositionsPanel(_client, _config, _monitor);
-            centrePanel.Controls.Add(_grid);
-            centrePanel.Controls.Add(_positionsPanel);
+            // Remove fixed dock — SplitContainer manages layout instead
+            _positionsPanel.Dock = DockStyle.Fill;
+            _grid.Dock           = DockStyle.Fill;
+
+            var splitContainer = new SplitContainer
+            {
+                Dock          = DockStyle.Fill,
+                Orientation   = Orientation.Horizontal,
+                SplitterWidth = 5,
+                BackColor     = Color.FromArgb(50, 50, 50),
+                Panel1MinSize = 100,
+                Panel2MinSize = 120,
+            };
+
+            splitContainer.Panel1.Controls.Add(_grid);
+            splitContainer.Panel2.Controls.Add(_positionsPanel);
+
+            var centrePanel = new Panel { Dock = DockStyle.Fill };
+            centrePanel.Controls.Add(splitContainer);
+
+            // Set splitter position once the form is fully laid out
+            Shown += (_, _) =>
+            {
+                if (splitContainer.Height > 300)
+                    splitContainer.SplitterDistance = splitContainer.Height - 185;
+            };
 
             // On startup: initialise asset indexes (needed for order placement) then load positions
             Load += async (_, _) =>

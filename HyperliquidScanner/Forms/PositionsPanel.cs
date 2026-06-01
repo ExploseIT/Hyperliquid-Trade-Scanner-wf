@@ -61,8 +61,7 @@ namespace HyperliquidScanner.Forms
                 _monitor.SlWarning   += (sym, pnl) => BeginInvoke(() => HighlightSlWarning(sym));
             }
 
-            Dock      = DockStyle.Bottom;
-            Height    = 155;
+            Dock = DockStyle.Fill;
             BackColor = Color.FromArgb(20, 20, 20);
 
             BuildControls();
