@@ -175,7 +175,9 @@ namespace HyperliquidScanner.Services
                 }
 
                 // ── TP check ─────────────────────────────────────────────────
-                if (riskConfig.TpEnabled && !state.TpFired && state.HasBeenBelowTp
+                // Fires whenever ROE is at or above the threshold — no "must have been below"
+                // guard needed for TP (unlike SL). Being above target = take profit.
+                if (riskConfig.TpEnabled && !state.TpFired
                     && pos.PnlPercent >= riskConfig.TpDecimal)
                 {
                     state.TpFired = true;
@@ -195,7 +197,7 @@ namespace HyperliquidScanner.Services
                     if (pos.PnlPercent > state.HighWaterMarkPct)
                         state.HighWaterMarkPct = pos.PnlPercent;
 
-                    // Activate once min profit level reached
+                    // Activate once min profit level reached (including if already above on first check)
                     if (!state.TrailingActive
                         && pos.PnlPercent >= riskConfig.TrailingMinProfitDecimal)
                     {
