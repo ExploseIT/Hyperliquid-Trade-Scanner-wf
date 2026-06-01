@@ -239,14 +239,24 @@ namespace HyperliquidScanner.Services
         }
 
         /// <summary>
-        /// Clears all per-symbol state. Called when config.json is reloaded at runtime
-        /// so new thresholds apply cleanly — existing positions re-evaluated from scratch.
+        /// Resets SL-related state when config.json is reloaded so new thresholds apply.
+        /// TpFired and TrailingFired are intentionally preserved — a TP/trail that already
+        /// fired should not re-fire just because the config was saved again.
         /// </summary>
         public void Reset()
         {
-            _states.Clear();
+            foreach (var state in _states.Values)
+            {
+                // SL state resets — new threshold should be re-evaluated fresh
+                state.HasBeenAboveSl   = false; // re-evaluated on next poll
+                state.SlFired          = false;
+                state.SlBelowPollCount = 0;
+
+                // TpFired and TrailingFired are NOT reset — prevents re-firing on reload
+                // DCA detection values kept so position changes are still tracked correctly
+            }
             _rsiSlopes.Clear();
-            System.Diagnostics.Debug.WriteLine("[Monitor] State reset — config reloaded.");
+            System.Diagnostics.Debug.WriteLine("[Monitor] SL state reset — config reloaded. TP/Trail state preserved.");
         }
 
         public SymbolRiskStatus GetStatus(string symbol)

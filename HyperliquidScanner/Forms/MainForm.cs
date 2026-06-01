@@ -387,6 +387,7 @@ namespace HyperliquidScanner.Forms
                 await _client.InitialiseAssetIndexesAsync();
                 await _positionsPanel.RefreshAsync();
                 SetupConfigWatcher();
+                ApplyStartupConfig();
             };
 
             Controls.Add(centrePanel);
@@ -949,6 +950,25 @@ namespace HyperliquidScanner.Forms
                 _statusLabel.Text      = $"Config reload failed: {ex.Message}";
                 _statusLabel.ForeColor = Color.FromArgb(220, 80, 80);
             }
+        }
+
+        private void ApplyStartupConfig()
+        {
+            // Set auto-refresh dropdown
+            var interval = _config.AutoRefreshInterval?.Trim() ?? "Off";
+            for (int i = 0; i < _autoRefreshCombo.Items.Count; i++)
+            {
+                if (string.Equals(_autoRefreshCombo.Items[i]?.ToString(), interval,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    _autoRefreshCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+
+            // Auto-start scan
+            if (_config.ScanOnStartup && _scanButton.Enabled)
+                ScanButton_Click(null, EventArgs.Empty);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)

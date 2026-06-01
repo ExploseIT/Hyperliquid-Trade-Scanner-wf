@@ -64,6 +64,17 @@ namespace HyperliquidScanner.Models
             ?? SymbolInfo.FirstOrDefault(s => s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase))
             ?? new SymbolRiskConfig();
 
+        /// <summary>If true, a scan starts automatically when the app launches.</summary>
+        [JsonProperty("scanOnStartup")]
+        public bool ScanOnStartup { get; set; } = false;
+
+        /// <summary>
+        /// Sets the Auto-refresh dropdown on startup.
+        /// Valid values: "Off", "1 min", "2 min", "5 min", "10 min"
+        /// </summary>
+        [JsonProperty("autoRefreshInterval")]
+        public string AutoRefreshInterval { get; set; } = "Off";
+
         public bool HasPrivateKey => !string.IsNullOrWhiteSpace(PrivateKey);
     }
 }

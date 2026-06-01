@@ -137,11 +137,33 @@ namespace HyperliquidScanner.Forms
             Controls.Add(_header);
         }
 
+        private int _emptyResponseCount = 0;
+        private const int EmptyResponseThreshold = 3; // require 3 consecutive empty responses before clearing
+
         public async Task RefreshAsync(CancellationToken ct = default)
         {
             try
             {
                 var positions = await _client.GetPositionsAsync(ct);
+
+                // Guard: if we get an empty response but previously had positions,
+                // require several consecutive empty responses before clearing the grid.
+                // This prevents transient API failures during scans from wiping the display.
+                if (positions.Count == 0 && _positions.Count > 0)
+                {
+                    _emptyResponseCount++;
+                    if (_emptyResponseCount < EmptyResponseThreshold)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[PositionsPanel] empty response {_emptyResponseCount}/{EmptyResponseThreshold} — keeping last known positions");
+                        return;
+                    }
+                }
+                else
+                {
+                    _emptyResponseCount = 0;
+                }
+
                 _positions = positions;
 
                 // Run risk monitor checks (fires SL/TP orders if thresholds crossed)
