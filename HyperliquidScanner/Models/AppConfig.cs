@@ -52,6 +52,10 @@ namespace HyperliquidScanner.Models
         [JsonProperty("autoRiskManagement")]
         public bool AutoRiskManagement { get; set; } = false;
 
+        /// <summary>Portfolio goal in USDC — shown in the connection bar as a progress tracker.</summary>
+        [JsonProperty("portfolioGoalUsd")]
+        public decimal PortfolioGoalUsd { get; set; } = 1000m;
+
         /// <summary>
         /// Master switch for all automated trading (Phase 3 auto-entry).
         /// When false, no entry orders are placed regardless of per-symbol rsiLLAutoEntry settings.

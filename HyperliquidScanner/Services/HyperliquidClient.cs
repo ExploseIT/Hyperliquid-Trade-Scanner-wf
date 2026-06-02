@@ -283,6 +283,50 @@ namespace HyperliquidScanner.Services
         // ── Position data ─────────────────────────────────────────────────────
 
         /// <summary>
+        /// Returns the full unified account value in USDC:
+        /// perps account value (clearinghouseState.marginSummary.accountValue)
+        /// + spot USDC balance (spotClearinghouseState).
+        /// Returns null on failure or if wallet address not configured.
+        /// </summary>
+        public async Task<decimal?> GetAccountValueAsync(CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return null;
+            try
+            {
+                // Perps account value
+                var perpsResp = await PostInfoAsync(
+                    new { type = "clearinghouseState", user = _config.WalletAddress }, ct);
+                var perpsVal = perpsResp["marginSummary"]?["accountValue"]?.Value<string>();
+                decimal perps = 0m;
+                decimal.TryParse(perpsVal, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out perps);
+
+                // Spot USDC balance
+                var spotResp = await PostInfoAsync(
+                    new { type = "spotClearinghouseState", user = _config.WalletAddress }, ct);
+                decimal spot = 0m;
+                if (spotResp["balances"] is JArray balances)
+                {
+                    foreach (var b in balances)
+                    {
+                        if (b["coin"]?.Value<string>() == "USDC")
+                        {
+                            decimal.TryParse(b["total"]?.Value<string>(),
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out spot);
+                            break;
+                        }
+                    }
+                }
+
+                var total = perps + spot;
+                return total > 0 ? total : null;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
         /// Returns all open perpetual positions for the configured wallet address.
         /// Uses the public clearinghouseState endpoint — wallet address only, no signing needed.
         /// Returns empty list if wallet address is not configured or on any error.

@@ -32,6 +32,7 @@ namespace HyperliquidScanner.Forms
         private Label             _statusLabel      = null!;
         private Label             _lastScanLabel    = null!;
         private Label             _connectionLabel  = null!;
+        private Label             _portfolioLabel   = null!;
         private ComboBox          _filterCombo         = null!;
         private TextBox           _searchBox           = null!;
         private ComboBox          _autoRefreshCombo    = null!;
@@ -279,12 +280,26 @@ namespace HyperliquidScanner.Forms
             };
             _connectionLabel.Location = new Point(toolbar.Width - 300, 15);
             toolbar.SizeChanged += (_, _) =>
+            {
                 _connectionLabel.Location = new Point(toolbar.Width - 300, 15);
+                _portfolioLabel.Location  = new Point(toolbar.Width - 300, 15);
+            };
+
+            _portfolioLabel = new Label
+            {
+                Text      = string.Empty,
+                ForeColor = Color.FromArgb(80, 220, 130),
+                AutoSize  = true,
+                Anchor    = AnchorStyles.Right | AnchorStyles.Top,
+                Font      = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+            _portfolioLabel.Location = new Point(toolbar.Width - 300, 15);
 
             toolbar.Controls.AddRange(new Control[]
             {
                 tfLabel, _timeframeCombo, _scanButton, _cancelButton,
-                _filterCombo, _searchBox, autoLabel, _autoRefreshCombo, _connectionLabel
+                _filterCombo, _searchBox, autoLabel, _autoRefreshCombo,
+                _connectionLabel, _portfolioLabel
             });
 
             // Status bar
@@ -408,6 +423,7 @@ namespace HyperliquidScanner.Forms
             {
                 await _client.InitialiseAssetIndexesAsync();
                 await _positionsPanel.RefreshAsync();
+                await UpdatePortfolioLabelAsync();
                 SetupConfigWatcher();
                 ApplyStartupConfig();
                 RestoreAlertBar();
@@ -534,6 +550,9 @@ namespace HyperliquidScanner.Forms
 
                 // Pass known asset names to positions panel for HIP-3 symbol resolution
                 _positionsPanel?.SetKnownAssets(_lastResults.Select(r => r.Asset));
+
+                // Refresh portfolio tracker after each scan
+                await UpdatePortfolioLabelAsync(_cts?.Token ?? default);
 
                 // Alert on newly detected RSI Lower Low signals
                 var now = DateTime.Now;
@@ -1158,6 +1177,33 @@ namespace HyperliquidScanner.Forms
                     _statusLabel.Text = "Ready";
             };
             t.Start();
+        }
+
+        // ── Portfolio tracker ─────────────────────────────────────────────────
+
+        private async Task UpdatePortfolioLabelAsync(CancellationToken ct = default)
+        {
+            try
+            {
+                var value = await _client.GetAccountValueAsync(ct);
+                if (value == null) return;
+
+                var goal    = _config.PortfolioGoalUsd;
+                var pct     = goal > 0 ? value.Value / goal * 100m : 0m;
+                var arrow   = value.Value >= goal ? "🎯" : "📈";
+                var colour  = value.Value >= goal ? Color.FromArgb(255, 220, 50)   // gold — goal reached!
+                            : value.Value >= goal * 0.9m ? Color.FromArgb(80, 220, 130)   // green — close
+                            : Color.FromArgb(100, 180, 255);                               // blue  — in progress
+
+                _portfolioLabel.Text      = $"{arrow} ${value.Value:F2} / ${goal:F0}  ({pct:F1}%)";
+                _portfolioLabel.ForeColor = colour;
+
+                // Move connection label left to make room
+                _connectionLabel.Location = new Point(
+                    _portfolioLabel.Left - _connectionLabel.Width - 20,
+                    _connectionLabel.Top);
+            }
+            catch { /* non-fatal */ }
         }
 
         private void ApplyStartupConfig()
