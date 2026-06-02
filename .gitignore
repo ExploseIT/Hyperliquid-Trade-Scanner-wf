@@ -21,3 +21,7 @@ desktop.ini
 # ── Zip archives ─────────────────────────────────────────────────────────────
 HyperliquidScanner_zips/
 *.zip
+
+# ── Logs and runtime state ───────────────────────────────────────────────────
+**/logs/
+rsi_ll_state.json

@@ -2,6 +2,7 @@ using HyperliquidScanner.Forms;
 using HyperliquidScanner.Services;
 using HyperliquidScanner.Utils;
 using HyperliquidScanner.Models;
+using Serilog;
 
 namespace HyperliquidScanner
 {
@@ -10,6 +11,7 @@ namespace HyperliquidScanner
         [STAThread]
         static void Main()
         {
+            AppLogger.Initialise();
             ApplicationConfiguration.Initialize();
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
 
@@ -19,6 +21,7 @@ namespace HyperliquidScanner
                 var appSettings = AppSettingsLoader.Load();
                 var client      = new HyperliquidClient(config);
                 var scanner     = new ScannerService(client, config);
+                scanner.Analyser.RsiLowerLowMinDropPct = appSettings.RsiLowerLowMinDropPct;
 
                 // Position monitor — only active if private key is configured
                 PositionMonitor? monitor = config.HasPrivateKey
@@ -34,16 +37,19 @@ namespace HyperliquidScanner
             }
             catch (FileNotFoundException ex)
             {
+                Log.Warning(ex, "First-time setup — config not found");
                 MessageBox.Show(ex.Message, "First-time setup",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                var msg = $"Startup error:\n\n{ex.Message}\n\n{ex.StackTrace}";
-                File.WriteAllText(Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, "startup_error.txt"), msg);
+                Log.Fatal(ex, "Startup error");
                 MessageBox.Show($"Startup error:\n\n{ex.Message}", "Hyperliquid Scanner",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                AppLogger.Shutdown();
             }
         }
     }

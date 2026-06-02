@@ -1,4 +1,5 @@
 using HyperliquidScanner.Models;
+using Serilog;
 
 namespace HyperliquidScanner.Services
 {
@@ -11,6 +12,8 @@ namespace HyperliquidScanner.Services
         private readonly HyperliquidClient _client;
         private readonly TrendAnalyser     _analyser;
         private readonly AppConfig         _config;
+
+        public TrendAnalyser Analyser => _analyser;
 
         public ScannerService(HyperliquidClient client, AppConfig config)
         {
@@ -95,7 +98,7 @@ namespace HyperliquidScanner.Services
                         IsBullish = false,
                         BullishScore = -1  // sentinel: indicates error
                     });
-                    System.Diagnostics.Debug.WriteLine($"[Scanner] {asset.Name} failed: {ex.Message}");
+                    Log.Warning("Scan error for {Asset}: {Message}", asset.Name, ex.Message);
                 }
 
                 // Throttle to avoid rate limiting

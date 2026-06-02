@@ -2,6 +2,7 @@ using HyperliquidScanner.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Collections.Generic;
+using Serilog;
 
 namespace HyperliquidScanner.Services
 {
@@ -521,8 +522,7 @@ namespace HyperliquidScanner.Services
                 if ((int)response.StatusCode == 429 && attempt <= 3)
                 {
                     var delay = attempt * 2_000; // 2s, 4s, 6s
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[API] 429 rate limit — waiting {delay}ms before retry {attempt}/3");
+                    Log.Warning("429 rate limit on attempt {Attempt}/3 — waiting {Delay}ms", attempt, delay);
                     await Task.Delay(delay, ct);
                     continue;
                 }

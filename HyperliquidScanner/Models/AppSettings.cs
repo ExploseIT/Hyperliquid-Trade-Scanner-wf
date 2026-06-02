@@ -25,5 +25,13 @@ namespace HyperliquidScanner.Models
         /// Leave empty to use a system sound.
         /// </summary>
         public string RsiLowerLowSoundFile { get; set; } = "";
+
+        /// <summary>
+        /// Minimum percentage drop from the previous RSI valley to the new lower low.
+        /// 0.125 = 12.5% (default). Raise to 0.15-0.20 on faster timeframes (15m)
+        /// to reduce noise; lower to 0.10 on slower timeframes (4h, 1d) to catch
+        /// more signals.
+        /// </summary>
+        public double RsiLowerLowMinDropPct { get; set; } = 0.125;
     }
 }

@@ -15,7 +15,12 @@ namespace HyperliquidScanner.Services
     /// </summary>
     public class TrendAnalyser
     {
-        public int BullishThreshold { get; set; } = 2;
+        public int    BullishThreshold      { get; set; } = 2;
+        /// <summary>
+        /// Minimum % drop from previous RSI valley to new lower low.
+        /// Default 0.125 (12.5%). Raise for faster timeframes to reduce noise.
+        /// </summary>
+        public double RsiLowerLowMinDropPct { get; set; } = 0.125;
 
         public AssetScanResult Analyse(string asset, string timeframe, List<CandleData> candles)
         {
@@ -203,14 +208,20 @@ namespace HyperliquidScanner.Services
                         ? (prevValley.rsi - lastValley.rsi) / prevValley.rsi
                         : 0.0;
 
+                    // Last complete candle must be green — confirms price is actually
+                    // recovering, not just RSI turning while price still falls
+                    var lastCompleteGreen = quotes.Count >= 2
+                        && quotes[^2].Close > quotes[^2].Open;
+
                     result.IsRsiLowerLow =
-                        pctDrop >= 0.125                         // ≥12.5% deeper than previous valley
+                        pctDrop >= RsiLowerLowMinDropPct         // configurable min drop (default 12.5%)
                         && lastValley.rsi < 45.0                 // lower low in oversold territory
                         && prevValley.rsi < 45.0                 // previous valley also oversold
                         && barsFromLastValley <= 5               // valley is very recent (within 5 bars)
                         && result.Rsi < 45m                      // current RSI still low (not already recovered)
                         && result.Rsi - (decimal)lastValley.rsi <= 8m  // still close to valley (not recovered >8pts)
-                        && result.RsiSlope > 1m;                 // clearly turning up, not just noise
+                        && result.RsiSlope > 1m                  // clearly turning up, not just noise
+                        && lastCompleteGreen;                    // last candle green — price recovering
                 }
             }
 

@@ -1,6 +1,7 @@
 using HyperliquidScanner.Models;
 using HyperliquidScanner.Services;
 using HyperliquidScanner.Utils;
+using Serilog;
 using static HyperliquidScanner.Utils.AudioPlayer;
 
 namespace HyperliquidScanner.Forms
@@ -393,6 +394,7 @@ namespace HyperliquidScanner.Forms
                 await _positionsPanel.RefreshAsync();
                 SetupConfigWatcher();
                 ApplyStartupConfig();
+                RestoreAlertBar();
             };
 
             // Dedicated RSI-LL alert bar — persists between scans, not overwritten by scan progress
@@ -518,11 +520,26 @@ namespace HyperliquidScanner.Forms
                 _positionsPanel?.SetKnownAssets(_lastResults.Select(r => r.Asset));
 
                 // Alert on newly detected RSI Lower Low signals
-                var newRsiLL = _lastResults
-                    .Where(r => r.IsRsiLowerLow && !previousRsiLL.Contains(r.Asset))
-                    .ToList();
-                if (newRsiLL.Count > 0)
-                    OnRsiLowerLowAlert(newRsiLL);
+                var now = DateTime.Now;
+
+                if (_firstScanCompleted)
+                {
+                    var newRsiLL = _lastResults
+                        .Where(r => r.IsRsiLowerLow
+                                 && !previousRsiLL.Contains(r.Asset)
+                                 && (!_rsiLLCooldowns.TryGetValue(r.Asset, out var coolUntil)
+                                     || now >= coolUntil))
+                        .ToList();
+
+                    if (newRsiLL.Count > 0)
+                    {
+                        foreach (var r in newRsiLL)
+                            _rsiLLCooldowns[r.Asset] = now + RsiLLCooldown;
+                        OnRsiLowerLowAlert(newRsiLL);
+                    }
+                }
+
+                _firstScanCompleted = true;
 
                 var bullishCount = _lastResults.Count(r => r.IsBullish);
                 var errorCount   = _lastResults.Count(r => r.BullishScore == -1);
@@ -896,29 +913,43 @@ namespace HyperliquidScanner.Forms
             // Poll both source and output config.json every 2 seconds.
             // FileSystemWatcher is unreliable with editors that save via temp+rename
             // (VS Code, Notepad++ etc.) — polling is simpler and always works.
-            var outputPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
-            var sourcePath = FindSourceConfig(); // project directory config.json
+            var outputPath        = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            var sourcePath        = FindSourceConfig();
+            var appSettingsOutput = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+            var appSettingsSource = FindSourceAppSettings();
 
-            // Seed the last-write time so we don't fire on startup
+            // Seed last-write times
             _lastConfigWrite = GetNewestWriteTime(outputPath, sourcePath);
+            var lastAppSettingsWrite = GetNewestWriteTime(appSettingsOutput, appSettingsSource);
 
             _configPollTimer = new System.Windows.Forms.Timer { Interval = 2_000 };
             _configPollTimer.Tick += (_, _) =>
             {
-                var newest = GetNewestWriteTime(outputPath, sourcePath);
-                if (newest <= _lastConfigWrite) return;
-
-                _lastConfigWrite = newest;
-
-                // If source is newer, copy it to output so the exe picks up the change
-                if (sourcePath != null && File.Exists(sourcePath)
-                    && File.GetLastWriteTime(sourcePath) >= File.GetLastWriteTime(outputPath))
+                // Poll config.json
+                var newestConfig = GetNewestWriteTime(outputPath, sourcePath);
+                if (newestConfig > _lastConfigWrite)
                 {
-                    try { File.Copy(sourcePath, outputPath, overwrite: true); }
-                    catch { /* non-fatal */ }
+                    _lastConfigWrite = newestConfig;
+                    if (sourcePath != null && File.Exists(sourcePath)
+                        && File.GetLastWriteTime(sourcePath) >= File.GetLastWriteTime(outputPath))
+                    {
+                        try { File.Copy(sourcePath, outputPath, overwrite: true); } catch { }
+                    }
+                    ReloadConfig();
                 }
 
-                ReloadConfig();
+                // Poll appsettings.json
+                var newestSettings = GetNewestWriteTime(appSettingsOutput, appSettingsSource);
+                if (newestSettings > lastAppSettingsWrite)
+                {
+                    lastAppSettingsWrite = newestSettings;
+                    if (appSettingsSource != null && File.Exists(appSettingsSource)
+                        && File.GetLastWriteTime(appSettingsSource) >= File.GetLastWriteTime(appSettingsOutput))
+                    {
+                        try { File.Copy(appSettingsSource, appSettingsOutput, overwrite: true); } catch { }
+                    }
+                    ReloadAppSettings();
+                }
             };
             _configPollTimer.Start();
         }
@@ -938,6 +969,22 @@ namespace HyperliquidScanner.Forms
         /// Walks up from the exe directory looking for a config.json alongside a .csproj
         /// (the project source directory, not the build output).
         /// </summary>
+        private static string? FindSourceAppSettings()
+        {
+            var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (dir != null)
+            {
+                if (dir.GetDirectories(".git").Length > 0)
+                {
+                    var candidate = Path.Combine(dir.FullName, "appsettings.json");
+                    if (File.Exists(candidate)) return candidate;
+                    break;
+                }
+                dir = dir.Parent;
+            }
+            return null;
+        }
+
         private static string? FindSourceConfig()
         {
             var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
@@ -952,6 +999,24 @@ namespace HyperliquidScanner.Forms
                 dir = dir.Parent;
             }
             return null;
+        }
+
+        private void ReloadAppSettings()
+        {
+            try
+            {
+                var fresh = AppSettingsLoader.Load();
+                _scanner.Analyser.RsiLowerLowMinDropPct = fresh.RsiLowerLowMinDropPct;
+                _statusLabel.Text      = $"⟳ appsettings.json reloaded — RSI-LL min drop: {fresh.RsiLowerLowMinDropPct:P1}";
+                _statusLabel.ForeColor = Color.FromArgb(100, 180, 255);
+                var t = new System.Windows.Forms.Timer { Interval = 5_000 };
+                t.Tick += (_, _) => { t.Stop(); t.Dispose(); _statusLabel.ForeColor = Color.Silver; };
+                t.Start();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AppSettings reload] {ex.Message}");
+            }
         }
 
         private void ReloadConfig()
@@ -989,9 +1054,22 @@ namespace HyperliquidScanner.Forms
 
         // ── RSI Lower Low alert ───────────────────────────────────────────────
 
-        // Keeps a rolling list of recent RSI-LL alerts for the alert bar
-        private readonly List<string> _rsiLLAlertHistory = new();
+        // RSI-LL persistent state (cooldowns + alert history survive app restarts)
+        private RsiLLState _rsiLLState = RsiLLStateManager.Load();
         private const int MaxAlertHistory = 8;
+        private bool _firstScanCompleted = false;
+        private static readonly TimeSpan RsiLLCooldown = TimeSpan.FromMinutes(30);
+
+        private Dictionary<string, DateTime> _rsiLLCooldowns => _rsiLLState.Cooldowns;
+        private List<string> _rsiLLAlertHistory              => _rsiLLState.AlertHistory;
+
+        private void RestoreAlertBar()
+        {
+            if (_rsiLLAlertHistory.Count == 0) return;
+            _alertBar.Text      = "📉 " + string.Join("   ·   ", _rsiLLAlertHistory.AsEnumerable().Reverse());
+            _alertBar.ForeColor = Color.FromArgb(255, 220, 50);
+            _alertBar.BackColor = Color.FromArgb(45, 35, 0);
+        }
 
         private void OnRsiLowerLowAlert(List<AssetScanResult> signals)
         {
@@ -1012,6 +1090,12 @@ namespace HyperliquidScanner.Forms
             // Keep only last N alerts
             while (_rsiLLAlertHistory.Count > MaxAlertHistory)
                 _rsiLLAlertHistory.RemoveAt(0);
+
+            // Persist state so cooldowns and history survive restarts
+            RsiLLStateManager.Save(_rsiLLState);
+
+            // Log the alert
+            Log.Information("RSI-LL alert: {Assets}", string.Join(", ", signals.Select(r => $"{r.Asset} RSI{r.Rsi:F0}")));
 
             // Update alert bar
             _alertBar.Text      = "📉 NEW: " + string.Join("   ·   ", _rsiLLAlertHistory.AsEnumerable().Reverse());
