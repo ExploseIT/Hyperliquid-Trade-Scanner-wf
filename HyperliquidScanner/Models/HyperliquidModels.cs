@@ -75,10 +75,12 @@ namespace HyperliquidScanner.Models
         public decimal RecentTrendPct { get; set; }  // price change over last 10 complete candles (context: falling knife vs sudden flush)
 
         public bool    IsReversalSetup { get; set; }  // oversold RSI turning up + green candle + beaten-down context
+        public bool    IsRsiLowerLow  { get; set; }  // RSI makes lower low below previous valley then turns up — exhaustion reversal
 
-        public bool HasAlert => VolumeSpike || PriceSurge || IsAbsorption || IsDistribution || IsClimax || IsReversalSetup;
+        public bool HasAlert => VolumeSpike || PriceSurge || IsAbsorption || IsDistribution || IsClimax || IsReversalSetup || IsRsiLowerLow;
 
         public string SignalLabel => IsBullish        ? "✓ Bullish"
+                                  : IsRsiLowerLow   ? "📉 RSI-LL"
                                   : IsReversalSetup  ? "↑ Reversal?"
                                   : IsBearish        ? "✗ Bearish"
                                   : "–";

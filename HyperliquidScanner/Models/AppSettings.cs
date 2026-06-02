@@ -19,5 +19,11 @@ namespace HyperliquidScanner.Models
         /// Relative to the repo root, or absolute. Leave empty to use system sound.
         /// </summary>
         public string CascadeSoundFile { get; set; } = "sounds/751861__def__alert-sound-single.wav";
+
+        /// <summary>
+        /// Path to the wav file played when an RSI Lower Low signal is detected during a scan.
+        /// Leave empty to use a system sound.
+        /// </summary>
+        public string RsiLowerLowSoundFile { get; set; } = "";
     }
 }

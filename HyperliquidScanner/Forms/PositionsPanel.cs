@@ -17,8 +17,12 @@ namespace HyperliquidScanner.Forms
         private Label                       _header  = null!;
         private System.Windows.Forms.Timer  _timer   = null!;
 
-        private List<PositionInfo> _positions  = new();
-        private HashSet<string>    _hip3Assets = new(StringComparer.OrdinalIgnoreCase);
+        private List<PositionInfo> _positions    = new();
+        private HashSet<string>    _hip3Assets   = new(StringComparer.OrdinalIgnoreCase);
+        private bool               _scanInProgress = false;
+
+        /// <summary>Set to true while a full asset scan is running to pause the mini-scan.</summary>
+        public void SetScanInProgress(bool scanning) => _scanInProgress = scanning;
 
         /// <summary>Fired after each position refresh — lets MainForm highlight matching grid rows.</summary>
         public event Action<List<PositionInfo>>? PositionsRefreshed;
@@ -144,6 +148,9 @@ namespace HyperliquidScanner.Forms
         {
             try
             {
+                // Skip mini-scan API calls while a full scan is running to avoid rate limiting
+                if (_scanInProgress) return;
+
                 var positions = await _client.GetPositionsAsync(ct);
 
                 // Guard: if we get an empty response but previously had positions,

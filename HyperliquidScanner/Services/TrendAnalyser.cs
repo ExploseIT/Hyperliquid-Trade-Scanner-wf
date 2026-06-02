@@ -182,7 +182,78 @@ namespace HyperliquidScanner.Services
                                       && lastCandleGreen;
             }
 
+            // ── RSI Lower Low: exhaustion reversal signal ─────────────────────
+            // Fires when:
+            //   1. RSI makes a lower low below the previous RSI valley (exhaustion)
+            //   2. RSI is now turning upward (slope positive — momentum shifting)
+            //   3. The lower low valley was recent (within last 15 bars)
+            //   4. Both valleys are in oversold territory (< 45) for significance
+            if (rsiValid.Count >= 20)
+            {
+                var valleys = FindRsiValleys(rsiValid);
+                if (valleys.Count >= 2)
+                {
+                    var prevValley = valleys[^2];
+                    var lastValley = valleys[^1];
+
+                    var barsFromLastValley = rsiValid.Count - 1 - lastValley.index;
+
+                    // % drop from previous valley to new valley — must be at least 12.5%
+                    var pctDrop = prevValley.rsi > 0
+                        ? (prevValley.rsi - lastValley.rsi) / prevValley.rsi
+                        : 0.0;
+
+                    result.IsRsiLowerLow =
+                        pctDrop >= 0.125                         // ≥12.5% deeper than previous valley
+                        && lastValley.rsi < 45.0                 // lower low in oversold territory
+                        && prevValley.rsi < 45.0                 // previous valley also oversold
+                        && barsFromLastValley <= 5               // valley is very recent (within 5 bars)
+                        && result.Rsi < 45m                      // current RSI still low (not already recovered)
+                        && result.Rsi - (decimal)lastValley.rsi <= 8m  // still close to valley (not recovered >8pts)
+                        && result.RsiSlope > 1m;                 // clearly turning up, not just noise
+                }
+            }
+
             return result;
+        }
+
+        /// <summary>
+        /// Finds RSI local minima (valleys) from a series of valid RSI values.
+        /// Uses a 3-bar window on each side and enforces a minimum separation
+        /// between valleys to avoid detecting noise as separate signals.
+        /// </summary>
+        private static List<(int index, double rsi)> FindRsiValleys(
+            IList<Skender.Stock.Indicators.RsiResult> rsiValid)
+        {
+            var valleys      = new List<(int index, double rsi)>();
+            const int window = 3;   // bars each side to confirm a valley
+            const int minSep = 5;   // minimum bars between valleys
+
+            for (int i = window; i < rsiValid.Count - window; i++)
+            {
+                var curr = rsiValid[i].Rsi!.Value;
+                bool isValley = true;
+                for (int j = 1; j <= window; j++)
+                {
+                    if (rsiValid[i - j].Rsi!.Value <= curr ||
+                        rsiValid[i + j].Rsi!.Value <= curr)
+                    { isValley = false; break; }
+                }
+                if (!isValley) continue;
+
+                // Enforce minimum separation — keep the lower of two close valleys
+                if (valleys.Count > 0 && i - valleys[^1].index < minSep)
+                {
+                    if (curr < valleys[^1].rsi)
+                        valleys[^1] = (i, curr);
+                }
+                else
+                {
+                    valleys.Add((i, curr));
+                }
+            }
+
+            return valleys;
         }
     }
 }

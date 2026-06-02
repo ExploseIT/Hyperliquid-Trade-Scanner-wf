@@ -508,14 +508,29 @@ namespace HyperliquidScanner.Services
 
         private async Task<JToken> PostInfoAsync(object payload, CancellationToken ct)
         {
-            var json    = JsonConvert.SerializeObject(payload);
-            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var json = JsonConvert.SerializeObject(payload);
 
-            var response = await _http.PostAsync("/info", content, ct);
-            response.EnsureSuccessStatusCode();
+            // Retry up to 3 times on 429 Too Many Requests with exponential backoff
+            int attempt = 0;
+            while (true)
+            {
+                attempt++;
+                var content  = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await _http.PostAsync("/info", content, ct);
 
-            var body = await response.Content.ReadAsStringAsync(ct);
-            return JToken.Parse(body);
+                if ((int)response.StatusCode == 429 && attempt <= 3)
+                {
+                    var delay = attempt * 2_000; // 2s, 4s, 6s
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[API] 429 rate limit — waiting {delay}ms before retry {attempt}/3");
+                    await Task.Delay(delay, ct);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                var body = await response.Content.ReadAsStringAsync(ct);
+                return JToken.Parse(body);
+            }
         }
 
         private static long IntervalToMs(string interval) => interval switch

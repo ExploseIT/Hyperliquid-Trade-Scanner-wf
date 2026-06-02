@@ -1,6 +1,7 @@
 using HyperliquidScanner.Models;
 using HyperliquidScanner.Services;
 using HyperliquidScanner.Utils;
+using static HyperliquidScanner.Utils.AudioPlayer;
 
 namespace HyperliquidScanner.Forms
 {
@@ -14,8 +15,9 @@ namespace HyperliquidScanner.Forms
         private readonly CoinglassClient?  _coinglass;
 
         // Custom alert sounds (null = fall back to system sound)
-        private readonly System.Media.SoundPlayer? _squeezeSound;
-        private readonly System.Media.SoundPlayer? _cascadeSound;
+        private readonly AudioPlayer? _squeezeSound;
+        private readonly AudioPlayer? _cascadeSound;
+        private readonly AudioPlayer? _rsiLowerLowSound;
 
         // UI Controls
         private ComboBox          _timeframeCombo   = null!;
@@ -30,6 +32,7 @@ namespace HyperliquidScanner.Forms
         private TextBox           _searchBox           = null!;
         private ComboBox          _autoRefreshCombo    = null!;
         private System.Windows.Forms.Timer _autoRefreshTimer = null!;
+        private Label             _alertBar            = null!;  // dedicated RSI-LL alert strip
         private LiquidationPanel? _liqPanel;
         private PositionsPanel?   _positionsPanel;
         private PositionMonitor?  _monitor;
@@ -63,10 +66,12 @@ namespace HyperliquidScanner.Forms
             _coinglass   = coinglass;
 
             // Load custom alert sounds — fall back to system sounds if files not found
-            var squeezePath = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
-            var cascadePath = AppSettingsLoader.ResolveSoundPath(_appSettings.CascadeSoundFile);
-            _squeezeSound = squeezePath != null ? new System.Media.SoundPlayer(squeezePath) : null;
-            _cascadeSound = cascadePath != null ? new System.Media.SoundPlayer(cascadePath) : null;
+            var squeezePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
+            var cascadePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.CascadeSoundFile);
+            var rsiLLPath       = AppSettingsLoader.ResolveSoundPath(_appSettings.RsiLowerLowSoundFile);
+            _squeezeSound       = squeezePath != null ? new AudioPlayer(squeezePath) : null;
+            _cascadeSound       = cascadePath != null ? new AudioPlayer(cascadePath) : null;
+            _rsiLowerLowSound   = rsiLLPath   != null ? new AudioPlayer(rsiLLPath)   : null;
 
 
             // Start the OKX live liquidation feed + aggregator (free public WebSocket)
@@ -390,7 +395,21 @@ namespace HyperliquidScanner.Forms
                 ApplyStartupConfig();
             };
 
+            // Dedicated RSI-LL alert bar — persists between scans, not overwritten by scan progress
+            _alertBar = new Label
+            {
+                Dock      = DockStyle.Top,
+                Height    = 22,
+                BackColor = Color.FromArgb(35, 18, 0),
+                ForeColor = Color.FromArgb(100, 100, 100),
+                Text      = "📉 RSI-LL alerts — none yet",
+                Font      = new Font("Segoe UI", 8.5f),
+                Padding   = new Padding(8, 3, 8, 0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
             Controls.Add(centrePanel);
+            Controls.Add(_alertBar);
             Controls.Add(toolbar);
             Controls.Add(statusBar);
 
@@ -488,12 +507,22 @@ namespace HyperliquidScanner.Forms
 
             try
             {
+                var previousRsiLL = _lastResults.Where(r => r.IsRsiLowerLow)
+                                               .Select(r => r.Asset).ToHashSet();
+
                 var newResults = await _scanner.ScanAsync(apiValue, progress, _cts.Token);
                 _lastResults = newResults;
                 RefreshGrid();
 
                 // Pass known asset names to positions panel for HIP-3 symbol resolution
                 _positionsPanel?.SetKnownAssets(_lastResults.Select(r => r.Asset));
+
+                // Alert on newly detected RSI Lower Low signals
+                var newRsiLL = _lastResults
+                    .Where(r => r.IsRsiLowerLow && !previousRsiLL.Contains(r.Asset))
+                    .ToList();
+                if (newRsiLL.Count > 0)
+                    OnRsiLowerLowAlert(newRsiLL);
 
                 var bullishCount = _lastResults.Count(r => r.IsBullish);
                 var errorCount   = _lastResults.Count(r => r.BullishScore == -1);
@@ -527,7 +556,7 @@ namespace HyperliquidScanner.Forms
             // Base filter — directional alerts punch through their matching filter only
             var toShow = _filterCombo.SelectedIndex switch
             {
-                1 => _lastResults.Where(r => r.IsBullish || r.IsAbsorption || r.IsClimax || r.IsReversalSetup),  // Bullish + reversal-up signals
+                1 => _lastResults.Where(r => r.IsBullish || r.IsAbsorption || r.IsClimax || r.IsReversalSetup || r.IsRsiLowerLow),  // Bullish + reversal-up signals
                 2 => _lastResults.Where(r => r.IsBearish || r.IsDistribution),              // Bearish + reversal-down signals
                 3 => _lastResults.Where(r => r.HasAlert),                                    // All alerts
                 _ => _lastResults                                                             // All assets
@@ -543,7 +572,8 @@ namespace HyperliquidScanner.Forms
                                     .ThenByDescending(r => r.BullishScore)
                                     .ThenByDescending(r => r.Rsi))
             {
-                var volCell = r.IsClimax       ? "⚡ Climax"
+                var volCell = r.IsRsiLowerLow  ? "📉 RSI-LL"
+                           : r.IsClimax       ? "⚡ Climax"
                            : r.IsAbsorption   ? "⟳ Absorb"
                            : r.IsDistribution ? "⟳ Dist"
                            : r.VolumeSpike    ? $"{r.VolumeRatio:F1}×"
@@ -568,7 +598,9 @@ namespace HyperliquidScanner.Forms
                 );
 
                 _grid.Rows[idx].Tag = r;
-                if (r.IsClimax)
+                if (r.IsRsiLowerLow)
+                    _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(50, 25, 0);   // dark orange — RSI exhaustion lower low
+                else if (r.IsClimax)
                     _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(40, 10, 55);  // dark purple — panic sell exhaustion
                 else if (r.IsReversalSetup)
                     _grid.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(15, 30, 60);  // dark blue — oversold reversal candidate
@@ -628,6 +660,8 @@ namespace HyperliquidScanner.Forms
                 var val = e.Value?.ToString() ?? "-";
                 if (val == "-")
                     e.CellStyle.ForeColor = Color.FromArgb(100, 100, 100);
+                else if (val == "📉 RSI-LL")                         // RSI lower low exhaustion → reversal up
+                    e.CellStyle.ForeColor = Color.FromArgb(255, 140, 0);
                 else if (val == "⚡ Climax")                         // panic sell exhaustion → sharp reversal up
                     e.CellStyle.ForeColor = Color.FromArgb(200, 150, 255);
                 else if (val == "⟳ Absorb")                         // selling absorbed → potential reversal up
@@ -852,6 +886,7 @@ namespace HyperliquidScanner.Forms
             _scanButton.Enabled   = !scanning;
             _cancelButton.Enabled = scanning;
             if (!scanning) _progressBar.Value = 0;
+            _positionsPanel?.SetScanInProgress(scanning);
         }
 
         // ── Config hot-reload ─────────────────────────────────────────────────
@@ -950,6 +985,57 @@ namespace HyperliquidScanner.Forms
                 _statusLabel.Text      = $"Config reload failed: {ex.Message}";
                 _statusLabel.ForeColor = Color.FromArgb(220, 80, 80);
             }
+        }
+
+        // ── RSI Lower Low alert ───────────────────────────────────────────────
+
+        // Keeps a rolling list of recent RSI-LL alerts for the alert bar
+        private readonly List<string> _rsiLLAlertHistory = new();
+        private const int MaxAlertHistory = 8;
+
+        private void OnRsiLowerLowAlert(List<AssetScanResult> signals)
+        {
+            // Play alert sound
+            try
+            {
+                if (_rsiLowerLowSound != null) _rsiLowerLowSound.Play();
+                else System.Media.SystemSounds.Asterisk.Play();
+            }
+            catch { }
+
+            // Add to alert history with timestamp
+            var time = DateTime.Now.ToString("HH:mm");
+            var (_, apiValue) = Timeframes.All[_timeframeCombo.SelectedIndex];
+            foreach (var sig in signals)
+                _rsiLLAlertHistory.Add($"{sig.Asset} {apiValue} RSI{sig.Rsi:F0} @{time}");
+
+            // Keep only last N alerts
+            while (_rsiLLAlertHistory.Count > MaxAlertHistory)
+                _rsiLLAlertHistory.RemoveAt(0);
+
+            // Update alert bar
+            _alertBar.Text      = "📉 NEW: " + string.Join("   ·   ", _rsiLLAlertHistory.AsEnumerable().Reverse());
+            _alertBar.ForeColor = Color.FromArgb(255, 220, 50);   // bright yellow
+            _alertBar.BackColor = Color.FromArgb(45, 35, 0);
+
+            // Flash matching grid rows
+            foreach (var sig in signals)
+                FlashGridRow(sig.Asset);
+
+            // Status bar also shows the new signal
+            var assets = string.Join(", ", signals.Select(r => $"{r.Asset} RSI{r.Rsi:F0}"));
+            _statusLabel.Text      = $"📉 RSI-LL  {assets}  {apiValue} — exhaustion reversal";
+            _statusLabel.ForeColor = Color.FromArgb(255, 220, 50);
+
+            var t = new System.Windows.Forms.Timer { Interval = 30_000 };
+            t.Tick += (_, _) =>
+            {
+                t.Stop(); t.Dispose();
+                _statusLabel.ForeColor = Color.Silver;
+                if (_statusLabel.Text.StartsWith("📉 RSI-LL"))
+                    _statusLabel.Text = "Ready";
+            };
+            t.Start();
         }
 
         private void ApplyStartupConfig()
