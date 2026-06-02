@@ -22,6 +22,12 @@ namespace HyperliquidScanner.Services
         /// </summary>
         public double RsiLowerLowMinDropPct { get; set; } = 0.125;
 
+        /// <summary>
+        /// Number of consecutive green candles required after the RSI lower low.
+        /// Default 1. Set to 2 for 15m to filter single-candle fakeouts.
+        /// </summary>
+        public int RsiLowerLowConfirmCandles { get; set; } = 1;
+
         public AssetScanResult Analyse(string asset, string timeframe, List<CandleData> candles)
         {
             var result = new AssetScanResult
@@ -208,10 +214,18 @@ namespace HyperliquidScanner.Services
                         ? (prevValley.rsi - lastValley.rsi) / prevValley.rsi
                         : 0.0;
 
-                    // Last complete candle must be green — confirms price is actually
-                    // recovering, not just RSI turning while price still falls
-                    var lastCompleteGreen = quotes.Count >= 2
-                        && quotes[^2].Close > quotes[^2].Open;
+                    // N consecutive complete candles must be green — configurable via
+                    // RsiLowerLowConfirmCandles (default 1, set to 2 for 15m)
+                    int confirmCount = Math.Max(1, RsiLowerLowConfirmCandles);
+                    bool lastCompleteGreen = quotes.Count >= confirmCount + 1;
+                    if (lastCompleteGreen)
+                    {
+                        for (int ci = 1; ci <= confirmCount; ci++)
+                        {
+                            if (quotes[^(ci + 1)].Close <= quotes[^(ci + 1)].Open)
+                            { lastCompleteGreen = false; break; }
+                        }
+                    }
 
                     result.IsRsiLowerLow =
                         pctDrop >= RsiLowerLowMinDropPct         // configurable min drop (default 12.5%)

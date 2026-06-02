@@ -404,6 +404,15 @@ namespace HyperliquidScanner.Services
             string symbol, bool isBuy, decimal price, decimal size,
             int szDecimals, CancellationToken ct = default)
         {
+            var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
+            return (ok, msg);
+        }
+
+        /// <summary>Places a limit entry order and returns the exchange order ID on success.</summary>
+        public async Task<(bool ok, string message, long orderId)> PlaceLimitEntryAsync(
+            string symbol, bool isBuy, decimal price, decimal size,
+            int szDecimals, CancellationToken ct = default)
+        {
             return await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
         }
 
@@ -415,24 +424,21 @@ namespace HyperliquidScanner.Services
             string symbol, bool isBuy, decimal markPrice, decimal size,
             int szDecimals, CancellationToken ct = default)
         {
-            // Aggressive price: 5% past mark to ensure immediate fill
-            var aggressivePrice = isBuy
-                ? markPrice * 1.05m   // buying to close a short — price above mark
-                : markPrice * 0.95m;  // selling to close a long  — price below mark
-
-            return await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size, szDecimals, "Ioc", ct);
+            var aggressivePrice = isBuy ? markPrice * 1.05m : markPrice * 0.95m;
+            var (ok, msg, _)    = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size, szDecimals, "Ioc", ct);
+            return (ok, msg);
         }
 
-        private async Task<(bool ok, string message)> PlaceOrderAsync(
+        private async Task<(bool ok, string message, long orderId)> PlaceOrderAsync(
             string symbol, bool isBuy, decimal price, decimal size,
             int szDecimals, string tif, CancellationToken ct)
         {
             if (!_config.HasPrivateKey)
-                return (false, "No private key configured — cannot place orders.");
+                return (false, "No private key configured — cannot place orders.", 0);
 
             var assetInfo = GetAssetIndex(symbol);
             if (assetInfo == null)
-                return (false, $"Asset index not found for {symbol} — run InitialiseAssetIndexesAsync first.");
+                return (false, $"Asset index not found for {symbol} — run InitialiseAssetIndexesAsync first.", 0);
 
             var (assetIndex, _) = assetInfo.Value;
             var nonce           = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -486,14 +492,18 @@ namespace HyperliquidScanner.Services
                 var status = parsed["status"]?.Value<string>();
 
                 if (status == "ok")
-                    return (true, $"Order placed: {(isBuy ? "Buy" : "Sell")} {sizeStr} {symbol} @ {priceStr}");
+                {
+                    var oid = parsed["response"]?["data"]?["statuses"]?[0]?["resting"]?["oid"]
+                              ?.Value<long>() ?? 0;
+                    return (true, $"Order placed: {(isBuy ? "Buy" : "Sell")} {sizeStr} {symbol} @ {priceStr}", oid);
+                }
 
                 var error = parsed["response"]?["data"]?.ToString() ?? respBody;
-                return (false, $"Order rejected: {error}");
+                return (false, $"Order rejected: {error}", 0);
             }
             catch (Exception ex)
             {
-                return (false, $"Order error: {ex.Message}");
+                return (false, $"Order error: {ex.Message}", 0);
             }
         }
 
@@ -503,6 +513,127 @@ namespace HyperliquidScanner.Services
             var magnitude = (int)Math.Floor(Math.Log10((double)Math.Abs(value)));
             var decimals  = Math.Max(0, sigFigs - 1 - magnitude);
             return value.ToString($"F{decimals}", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// Returns all open orders for the configured wallet address.
+        /// Used to check if an entry order has filled or is still resting.
+        /// </summary>
+        public async Task<List<(long oid, int assetIndex, bool isBuy, decimal price, decimal size)>>
+            GetOpenOrdersAsync(CancellationToken ct = default)
+        {
+            var result = new List<(long, int, bool, decimal, decimal)>();
+            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return result;
+            try
+            {
+                var payload  = new { type = "openOrders", user = _config.WalletAddress };
+                var response = await PostInfoAsync(payload, ct);
+                if (response is not JArray arr) return result;
+                foreach (var o in arr)
+                {
+                    var oid   = o["oid"]?.Value<long>() ?? 0;
+                    var coin  = o["coin"]?.Value<string>() ?? "";
+                    var side  = o["side"]?.Value<string>() ?? "";
+                    var px    = ParseDecimal(o["limitPx"]);
+                    var sz    = ParseDecimal(o["sz"]);
+                    if (_assetIndexes.TryGetValue(coin, out var info))
+                        result.Add((oid, info.index, side == "B", px, sz));
+                }
+            }
+            catch (Exception ex) { Log.Warning("GetOpenOrders failed: {Msg}", ex.Message); }
+            return result;
+        }
+
+        /// <summary>
+        /// Cancels a specific order by asset index and order ID.
+        /// Returns (true, msg) on success.
+        /// </summary>
+        public async Task<(bool ok, string message)> CancelOrderAsync(
+            int assetIndex, long orderId, CancellationToken ct = default)
+        {
+            if (!_config.HasPrivateKey) return (false, "No private key configured.");
+            var nonce       = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var actionBytes = HyperliquidSigner.SerializeCancelOrder(assetIndex, orderId);
+            var (r, s, v)   = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+            var body = new
+            {
+                action    = new { type = "cancel", cancels = new[] { new { a = assetIndex, o = orderId } } },
+                nonce,
+                signature = new { r, s, v }
+            };
+            try
+            {
+                var json     = Newtonsoft.Json.JsonConvert.SerializeObject(body);
+                var content  = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await _http.PostAsync("/exchange", content, ct);
+                var respBody = await response.Content.ReadAsStringAsync(ct);
+                var parsed   = JToken.Parse(respBody);
+                return parsed["status"]?.Value<string>() == "ok"
+                    ? (true, "Cancelled")
+                    : (false, parsed.ToString());
+            }
+            catch (Exception ex) { return (false, ex.Message); }
+        }
+
+        /// <summary>
+        /// Places a native trigger order (TP or SL) that persists on the exchange.
+        /// tpsl: "tp" or "sl". isMarket: true = market fill when triggered.
+        /// Returns (true, orderId) on success.
+        /// </summary>
+        public async Task<(bool ok, string message, long orderId)> PlaceTriggerOrderAsync(
+            string symbol, bool isBuy, decimal price, decimal triggerPrice,
+            decimal size, int szDecimals, string tpsl, bool isMarket,
+            CancellationToken ct = default)
+        {
+            if (!_config.HasPrivateKey) return (false, "No private key.", 0);
+            var assetInfo = GetAssetIndex(symbol);
+            if (assetInfo == null) return (false, $"Asset index unknown for {symbol}", 0);
+
+            var (assetIndex, _) = assetInfo.Value;
+            var nonce     = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var priceStr  = FormatDecimal(price, 5);
+            var trigStr   = FormatDecimal(triggerPrice, 5);
+            var sizeStr   = size.ToString($"F{szDecimals}",
+                System.Globalization.CultureInfo.InvariantCulture);
+
+            var actionBytes = HyperliquidSigner.SerializeTriggerOrder(
+                assetIndex, isBuy, priceStr, trigStr, sizeStr, true, tpsl, isMarket);
+            var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+
+            var body = new
+            {
+                action = new
+                {
+                    type   = "order",
+                    orders = new[]
+                    {
+                        new
+                        {
+                            a = assetIndex, b = isBuy, p = priceStr, s = sizeStr, r = true,
+                            t = new { trigger = new { triggerPx = trigStr, isMarket, tpsl } }
+                        }
+                    },
+                    grouping = "na"
+                },
+                nonce,
+                signature = new { r, s, v }
+            };
+            try
+            {
+                var json     = Newtonsoft.Json.JsonConvert.SerializeObject(body);
+                var content  = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await _http.PostAsync("/exchange", content, ct);
+                var respBody = await response.Content.ReadAsStringAsync(ct);
+                var parsed   = JToken.Parse(respBody);
+                if (parsed["status"]?.Value<string>() == "ok")
+                {
+                    var oid = parsed["response"]?["data"]?["statuses"]?[0]?["resting"]?["oid"]
+                              ?.Value<long>() ?? 0;
+                    return (true, $"Trigger {tpsl} placed", oid);
+                }
+                return (false, parsed.ToString(), 0);
+            }
+            catch (Exception ex) { return (false, ex.Message, 0); }
         }
 
         // ── Internals ─────────────────────────────────────────────────────────

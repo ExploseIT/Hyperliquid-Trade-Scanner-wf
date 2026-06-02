@@ -1,4 +1,5 @@
 using HyperliquidScanner.Models;
+using Serilog;
 
 namespace HyperliquidScanner.Services
 {
@@ -96,6 +97,12 @@ namespace HyperliquidScanner.Services
                         LastKnownEntry = pos.EntryPrice
                     };
                     _states[pos.Symbol] = state;
+                    Log.Information(
+                        "Monitor watching {Symbol}: SL={SlEnabled} -${SlUsd} TP={TpEnabled} +${TpUsd} " +
+                        "Trail={TrailEnabled}  PnL=${Pnl:F2}  AboveSL={AboveSl}",
+                        pos.Symbol, riskConfig.SlEnabled, riskConfig.SlUsd,
+                        riskConfig.TpEnabled, riskConfig.TpUsd,
+                        riskConfig.TrailingEnabled, pos.UnrealisedPnl, state.HasBeenAboveSl);
 
                     if (!state.HasBeenAboveSl)
                         System.Diagnostics.Debug.WriteLine(
@@ -156,6 +163,7 @@ namespace HyperliquidScanner.Services
                             state.SlFired = true;
                             var label = $"{pos.Symbol} SL @ -${riskConfig.SlUsd:F2}  " +
                                         $"PnL ${pos.UnrealisedPnl:F2}  RSI slope {rsiSlope:F1}";
+                            Log.Warning("PositionMonitor SL firing: {Label}", label);
                             if (isHip3)
                                 OrderFailed?.Invoke(pos.Symbol,
                                     $"⚠ SL triggered for {label} — HIP-3, manual close required");
@@ -181,6 +189,7 @@ namespace HyperliquidScanner.Services
                     state.TpFired = true;
                     var label = $"{pos.Symbol} TP @ +${riskConfig.TpUsd:F2}  " +
                                 $"PnL ${pos.UnrealisedPnl:F2}";
+                    Log.Information("PositionMonitor TP firing: {Label}", label);
                     if (isHip3)
                         OrderFailed?.Invoke(pos.Symbol,
                             $"🎯 TP triggered for {label} — HIP-3, manual close required");
@@ -215,6 +224,7 @@ namespace HyperliquidScanner.Services
                                         $"peak ${state.HighWaterMarkUsd:F2}  " +
                                         $"now ${pos.UnrealisedPnl:F2}  " +
                                         $"retrace ${retraceFromPeak:F2}";
+                            Log.Information("PositionMonitor trailing firing: {Label}", label);
                             if (isHip3)
                                 OrderFailed?.Invoke(pos.Symbol,
                                     $"🔒 Trailing triggered for {label} — HIP-3, manual close required");
@@ -339,17 +349,28 @@ namespace HyperliquidScanner.Services
             var (ok, msg) = await _client.PlaceLimitCloseAsync(
                 pos.Symbol, isBuy, limitPrice, pos.Size, szDec, ct);
 
-            if (ok) { OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — limit close placed"); return; }
+            if (ok)
+            {
+                Log.Information("SL limit placed: {Label}", label);
+                OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — limit close placed");
+                return;
+            }
 
             // Fallback: market (IOC)
-            System.Diagnostics.Debug.WriteLine($"[Monitor] SL limit failed ({msg}), trying market");
+            Log.Warning("SL limit failed ({Msg}), trying market for {Symbol}", msg, pos.Symbol);
             (ok, msg) = await _client.PlaceMarketCloseAsync(
                 pos.Symbol, isBuy, pos.MarkPrice, pos.Size, szDec, ct);
 
             if (ok)
+            {
+                Log.Information("SL market placed: {Label}", label);
                 OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — market close placed");
+            }
             else
+            {
+                Log.Error("SL FAILED for {Label}: {Msg}", label, msg);
                 OrderFailed?.Invoke(pos.Symbol, $"SL FAILED for {label}: {msg}");
+            }
         }
 
         private async Task TriggerTpAsync(
@@ -377,9 +398,15 @@ namespace HyperliquidScanner.Services
                 pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
 
             if (ok)
+            {
+                Log.Information("TP placed: {Label}", label);
                 OrderPlaced?.Invoke(pos.Symbol, $"🟢 TP {label} — closed {cfg.TpSizeDecimal:P0}");
+            }
             else
+            {
+                Log.Error("TP FAILED for {Label}: {Msg}", label, msg);
                 OrderFailed?.Invoke(pos.Symbol, $"TP FAILED for {label}: {msg}");
+            }
         }
 
         private async Task TriggerTrailingAsync(
@@ -408,9 +435,15 @@ namespace HyperliquidScanner.Services
                 pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
 
             if (ok)
+            {
+                Log.Information("Trailing placed: {Label}", label);
                 OrderPlaced?.Invoke(pos.Symbol, $"🔒 Trailing {label} — closed {cfg.TrailingSizeDecimal:P0}");
+            }
             else
+            {
+                Log.Error("Trailing FAILED for {Label}: {Msg}", label, msg);
                 OrderFailed?.Invoke(pos.Symbol, $"Trailing FAILED for {label}: {msg}");
+            }
         }
     }
 

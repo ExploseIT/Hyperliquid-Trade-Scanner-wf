@@ -84,6 +84,49 @@ namespace HyperliquidScanner.Services
         // ── Msgpack serialisation for order actions ───────────────────────────
 
         /// <summary>
+        /// Serialises a trigger order (TP or SL) action to msgpack bytes.
+        /// tpsl: "tp" for take profit, "sl" for stop loss.
+        /// isMarket: true = market execution when triggered, false = limit.
+        /// </summary>
+        public static byte[] SerializeTriggerOrder(
+            int assetIndex, bool isBuy, string price, string triggerPrice,
+            string size, bool reduceOnly, string tpsl, bool isMarket)
+        {
+            var triggerMap = Map(
+                ("triggerPx", Str(triggerPrice)),
+                ("isMarket",  Bool(isMarket)),
+                ("tpsl",      Str(tpsl))
+            );
+            var typeMap  = Map(("trigger", triggerMap));
+            var order    = Map(
+                ("a", Int(assetIndex)),
+                ("b", Bool(isBuy)),
+                ("p", Str(price)),
+                ("s", Str(size)),
+                ("r", Bool(reduceOnly)),
+                ("t", typeMap)
+            );
+            return Map(
+                ("type",     Str("order")),
+                ("orders",   Arr(order)),
+                ("grouping", Str("na"))
+            );
+        }
+
+        /// <summary>Serialises a cancel action for a single order.</summary>
+        public static byte[] SerializeCancelOrder(int assetIndex, long orderId)
+        {
+            var cancel = Map(
+                ("a", Int(assetIndex)),
+                ("o", Long(orderId))
+            );
+            return Map(
+                ("type",    Str("cancel")),
+                ("cancels", Arr(cancel))
+            );
+        }
+
+        /// <summary>
         /// Serialises a limit order action to msgpack bytes.
         /// Maps field ordering must exactly match Hyperliquid's Python SDK.
         /// </summary>
@@ -150,6 +193,15 @@ namespace HyperliquidScanner.Services
             if (v is >= 0 and <= 127) return new[] { (byte)v };
             if (v <= 255)             return new[] { (byte)0xcc, (byte)v };
             return new[] { (byte)0xcd, (byte)(v >> 8), (byte)(v & 0xff) };
+        }
+
+        private static byte[] Long(long v)
+        {
+            if (v is >= 0 and <= 127) return new[] { (byte)v };
+            // uint64: 0xcf + 8 bytes big-endian
+            var bytes = BitConverter.GetBytes((ulong)v);
+            if (BitConverter.IsLittleEndian) Array.Reverse(bytes);
+            return new byte[] { 0xcf }.Concat(bytes).ToArray();
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────

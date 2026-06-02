@@ -26,6 +26,12 @@ namespace HyperliquidScanner.Models
         /// </summary>
         public string RsiLowerLowSoundFile { get; set; } = "";
 
+        /// <summary>Played when a Phase 3 entry limit order is placed on the exchange.</summary>
+        public string EntryPlacedSoundFile { get; set; } = "";
+
+        /// <summary>Played when a Phase 3 entry order is confirmed filled.</summary>
+        public string EntryFilledSoundFile { get; set; } = "";
+
         /// <summary>
         /// Minimum percentage drop from the previous RSI valley to the new lower low.
         /// 0.125 = 12.5% (default). Raise to 0.15-0.20 on faster timeframes (15m)
@@ -33,5 +39,11 @@ namespace HyperliquidScanner.Models
         /// more signals.
         /// </summary>
         public double RsiLowerLowMinDropPct { get; set; } = 0.125;
+
+        /// <summary>
+        /// Number of consecutive green candles required after the RSI lower low
+        /// before the signal fires. Default 1. Set to 2 for 15m to filter fakeouts.
+        /// </summary>
+        public int RsiLowerLowConfirmCandles { get; set; } = 1;
     }
 }

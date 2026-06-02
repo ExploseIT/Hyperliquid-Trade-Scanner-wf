@@ -70,5 +70,50 @@ namespace HyperliquidScanner.Models
         /// <summary>Fraction of position to close on trailing stop fire. 1.0 = close all.</summary>
         [JsonProperty("trailingSizeDecimal")]
         public decimal TrailingSizeDecimal { get; set; } = 1.0m;
+
+        // ── Phase 3: RSI-LL auto-entry ────────────────────────────────────────
+
+        /// <summary>Enable automatic entry on RSI Lower Low signal for this symbol.</summary>
+        [JsonProperty("rsiLLAutoEntry")]
+        public bool RsiLLAutoEntry { get; set; } = false;
+
+        /// <summary>USD margin to commit per auto-entry (e.g. 100 = $100 margin).</summary>
+        [JsonProperty("rsiLLEntrySizeUsd")]
+        public decimal RsiLLEntrySizeUsd { get; set; } = 100m;
+
+        /// <summary>Leverage to apply on auto-entry.</summary>
+        [JsonProperty("rsiLLLeverage")]
+        public int RsiLLLeverage { get; set; } = 5;
+
+        /// <summary>
+        /// Limit entry price offset from mark price.
+        /// 0.001 = 0.1% inside the bid — nearly instant fill, earns maker fee.
+        /// </summary>
+        [JsonProperty("rsiLLEntryOffsetPct")]
+        public decimal RsiLLEntryOffsetPct { get; set; } = 0.001m;
+
+        /// <summary>Seconds to wait for entry limit to fill before cancelling.</summary>
+        [JsonProperty("rsiLLEntryTimeoutSec")]
+        public int RsiLLEntryTimeoutSec { get; set; } = 30;
+
+        /// <summary>If true, auto-entry fires even if a position already exists (DCA in).</summary>
+        [JsonProperty("rsiLLDcaIfPositionExists")]
+        public bool RsiLLDcaIfPositionExists { get; set; } = true;
+
+        /// <summary>If true, shows a timed confirmation dialog before placing the entry order.</summary>
+        [JsonProperty("rsiLLRequireConfirmation")]
+        public bool RsiLLRequireConfirmation { get; set; } = true;
+
+        /// <summary>USD take profit for the auto-entry bracket order.</summary>
+        [JsonProperty("rsiLLTpUsd")]
+        public decimal RsiLLTpUsd { get; set; } = 20m;
+
+        /// <summary>USD stop loss for the auto-entry bracket order.</summary>
+        [JsonProperty("rsiLLSlUsd")]
+        public decimal RsiLLSlUsd { get; set; } = 10m;
+
+        /// <summary>Fraction of auto-entry position to close on TP. 1.0 = close all.</summary>
+        [JsonProperty("rsiLLTpSizeDecimal")]
+        public decimal RsiLLTpSizeDecimal { get; set; } = 1.0m;
     }
 }

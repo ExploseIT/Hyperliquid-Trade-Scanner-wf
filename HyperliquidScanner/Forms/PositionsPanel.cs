@@ -17,7 +17,7 @@ namespace HyperliquidScanner.Forms
         private Label                       _header  = null!;
         private System.Windows.Forms.Timer  _timer   = null!;
 
-        private List<PositionInfo> _positions    = new();
+        internal List<PositionInfo> _positions    = new();
         private HashSet<string>    _hip3Assets   = new(StringComparer.OrdinalIgnoreCase);
         private bool               _scanInProgress = false;
 

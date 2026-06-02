@@ -19,6 +19,9 @@ namespace HyperliquidScanner.Forms
         private readonly AudioPlayer? _squeezeSound;
         private readonly AudioPlayer? _cascadeSound;
         private readonly AudioPlayer? _rsiLowerLowSound;
+        private readonly AudioPlayer? _entryPlacedSound;
+        private readonly AudioPlayer? _entryFilledSound;
+        private readonly AutoEntryManager? _autoEntry;
 
         // UI Controls
         private ComboBox          _timeframeCombo   = null!;
@@ -57,7 +60,7 @@ namespace HyperliquidScanner.Forms
 
         public MainForm(AppConfig config, AppSettings appSettings, HyperliquidClient client,
                         ScannerService scanner, PositionMonitor? monitor = null,
-                        CoinglassClient? coinglass = null)
+                        AutoEntryManager? autoEntry = null, CoinglassClient? coinglass = null)
         {
             _config      = config;
             _appSettings = appSettings;
@@ -70,9 +73,22 @@ namespace HyperliquidScanner.Forms
             var squeezePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
             var cascadePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.CascadeSoundFile);
             var rsiLLPath       = AppSettingsLoader.ResolveSoundPath(_appSettings.RsiLowerLowSoundFile);
-            _squeezeSound       = squeezePath != null ? new AudioPlayer(squeezePath) : null;
-            _cascadeSound       = cascadePath != null ? new AudioPlayer(cascadePath) : null;
-            _rsiLowerLowSound   = rsiLLPath   != null ? new AudioPlayer(rsiLLPath)   : null;
+            var entryPlacedPath = AppSettingsLoader.ResolveSoundPath(_appSettings.EntryPlacedSoundFile);
+            var entryFilledPath = AppSettingsLoader.ResolveSoundPath(_appSettings.EntryFilledSoundFile);
+            _squeezeSound       = squeezePath     != null ? new AudioPlayer(squeezePath)     : null;
+            _cascadeSound       = cascadePath     != null ? new AudioPlayer(cascadePath)     : null;
+            _rsiLowerLowSound   = rsiLLPath       != null ? new AudioPlayer(rsiLLPath)       : null;
+            _entryPlacedSound   = entryPlacedPath != null ? new AudioPlayer(entryPlacedPath) : null;
+            _entryFilledSound   = entryFilledPath != null ? new AudioPlayer(entryFilledPath) : null;
+
+            _autoEntry = autoEntry;
+            if (_autoEntry != null)
+            {
+                _autoEntry.EntryPlaced   += (sym, msg) => BeginInvoke(() => OnAutoEntryEvent(msg, Color.FromArgb(100, 180, 255)));
+                _autoEntry.EntryFilled   += (sym, msg) => BeginInvoke(() => { OnAutoEntryEvent(msg, Color.FromArgb(80, 220, 130)); _entryFilledSound?.Play(); });
+                _autoEntry.EntryFailed   += (sym, msg) => BeginInvoke(() => OnAutoEntryEvent(msg, Color.FromArgb(220, 80, 80)));
+                _autoEntry.BracketPlaced += (sym, msg) => BeginInvoke(() => OnAutoEntryEvent(msg, Color.FromArgb(80, 220, 130)));
+            }
 
 
             // Start the OKX live liquidation feed + aggregator (free public WebSocket)
@@ -536,6 +552,15 @@ namespace HyperliquidScanner.Forms
                         foreach (var r in newRsiLL)
                             _rsiLLCooldowns[r.Asset] = now + RsiLLCooldown;
                         OnRsiLowerLowAlert(newRsiLL);
+
+                        // Phase 3: trigger auto-entry for qualifying symbols
+                        if (_autoEntry != null && _config.AutotradingEnabled)
+                        {
+                            var positions = _positionsPanel?._positions
+                                            ?? new List<PositionInfo>();
+                            _ = _autoEntry.ProcessSignalsAsync(
+                                    newRsiLL, positions, 0, _cts?.Token ?? default);
+                        }
                     }
                 }
 
@@ -1064,6 +1089,17 @@ namespace HyperliquidScanner.Forms
 
         private Dictionary<string, DateTime> _rsiLLCooldowns => _rsiLLState.Cooldowns;
         private List<string> _rsiLLAlertHistory              => _rsiLLState.AlertHistory;
+
+        private void OnAutoEntryEvent(string message, Color colour)
+        {
+            _statusLabel.Text      = message;
+            _statusLabel.ForeColor = colour;
+            Log.Information("AutoEntry event: {Message}", message);
+
+            var t = new System.Windows.Forms.Timer { Interval = 15_000 };
+            t.Tick += (_, _) => { t.Stop(); t.Dispose(); _statusLabel.ForeColor = Color.Silver; };
+            t.Start();
+        }
 
         private void RestoreAlertBar()
         {
