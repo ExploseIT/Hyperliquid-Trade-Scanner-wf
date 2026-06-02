@@ -6,9 +6,9 @@ namespace HyperliquidScanner.Models
     /// Per-symbol risk management thresholds.
     /// Use symbol = "DEFAULT" as the fallback for any symbol not explicitly listed.
     ///
-    /// Thresholds are expressed as a decimal fraction of notional position value:
-    ///   slDecimal = 0.025  →  stop loss at -2.5% of notional
-    ///   tpDecimal = 0.05   →  take profit at +5.0% of notional
+    /// All SL/TP/trailing thresholds are expressed in USD (unrealised PnL):
+    ///   slUsd = 15  →  stop loss when down $15
+    ///   tpUsd = 30  →  take profit when up $30
     ///   tpSizeDecimal = 0.5 → close 50% of position size on TP
     /// </summary>
     public class SymbolRiskConfig
@@ -16,15 +16,15 @@ namespace HyperliquidScanner.Models
         [JsonProperty("symbol")]
         public string Symbol { get; set; } = "DEFAULT";
 
-        /// <summary>Stop loss threshold as fraction of notional. 0.025 = 2.5% loss.</summary>
-        [JsonProperty("slDecimal")]
-        public decimal SlDecimal { get; set; } = 0.025m;
+        /// <summary>Stop loss threshold in USD. Fires when unrealised PnL ≤ -slUsd.</summary>
+        [JsonProperty("slUsd")]
+        public decimal SlUsd { get; set; } = 10m;
 
-        /// <summary>Take profit threshold as fraction of notional. 0.05 = 5.0% gain.</summary>
-        [JsonProperty("tpDecimal")]
-        public decimal TpDecimal { get; set; } = 0.05m;
+        /// <summary>Take profit threshold in USD. Fires when unrealised PnL ≥ +tpUsd.</summary>
+        [JsonProperty("tpUsd")]
+        public decimal TpUsd { get; set; } = 20m;
 
-        /// <summary>Fraction of position size to close on TP. 0.5 = close half.</summary>
+        /// <summary>Fraction of position size to close on TP. 0.5 = close half, 1.0 = close all.</summary>
         [JsonProperty("tpSizeDecimal")]
         public decimal TpSizeDecimal { get; set; } = 0.5m;
 
@@ -36,6 +36,10 @@ namespace HyperliquidScanner.Models
         /// </summary>
         [JsonProperty("slConfirmationPolls")]
         public int SlConfirmationPolls { get; set; } = 3;
+
+        /// <summary>If true, this position is hidden from the positions panel grid.</summary>
+        [JsonProperty("gridview_disabled")]
+        public bool GridViewDisabled { get; set; } = false;
 
         /// <summary>Enable automatic stop loss for this symbol.</summary>
         [JsonProperty("sl_enabled")]
@@ -50,19 +54,18 @@ namespace HyperliquidScanner.Models
         public bool TrailingEnabled { get; set; } = false;
 
         /// <summary>
-        /// Minimum ROE% the position must reach before the trailing stop activates.
-        /// Prevents trailing from firing at a loss if the position peaks at a low level.
-        /// e.g. 0.10 = trailing only activates after +10% ROE.
+        /// Minimum USD profit the position must reach before the trailing stop activates.
+        /// e.g. 15 = trailing only activates after +$15 unrealised PnL.
         /// </summary>
-        [JsonProperty("trailingMinProfitDecimal")]
-        public decimal TrailingMinProfitDecimal { get; set; } = 0.10m;
+        [JsonProperty("trailingMinProfitUsd")]
+        public decimal TrailingMinProfitUsd { get; set; } = 10m;
 
         /// <summary>
-        /// How much the ROE% must retrace from its peak to trigger the trailing stop.
-        /// e.g. 0.08 = fires if ROE drops 8% from its high-water mark.
+        /// How much the USD PnL must retrace from its peak to trigger the trailing stop.
+        /// e.g. 8 = fires if PnL drops $8 from its high-water mark.
         /// </summary>
-        [JsonProperty("trailingRetraceDecimal")]
-        public decimal TrailingRetraceDecimal { get; set; } = 0.08m;
+        [JsonProperty("trailingRetraceUsd")]
+        public decimal TrailingRetraceUsd { get; set; } = 5m;
 
         /// <summary>Fraction of position to close on trailing stop fire. 1.0 = close all.</summary>
         [JsonProperty("trailingSizeDecimal")]

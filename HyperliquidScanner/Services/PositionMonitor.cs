@@ -4,12 +4,13 @@ namespace HyperliquidScanner.Services
 {
     /// <summary>
     /// Monitors open positions against SL/TP thresholds defined in config.json.
+    /// All thresholds are in USD (unrealised PnL).
     ///
     /// SL confirmation (two-layer filter to prevent wick-induced false triggers):
-    ///   1. PnL% must stay below -slDecimal for N consecutive polls (slConfirmationPolls × 5s)
+    ///   1. UnrealisedPnl must stay below -slUsd for N consecutive polls (slConfirmationPolls × 5s)
     ///   2. RSI slope for the symbol must be negative (mini-scan confirms momentum)
     ///
-    /// TP: fires immediately when PnL% crosses above +tpDecimal (no confirmation needed).
+    /// TP: fires immediately when UnrealisedPnl >= +tpUsd.
     ///
     /// HIP-3 positions (e.g. xyz:AMD): monitored and alerted but NOT auto-closed.
     /// </summary>
@@ -29,8 +30,8 @@ namespace HyperliquidScanner.Services
             public decimal InitialPnlPct     { get; set; }
             public int     SlBelowPollCount  { get; set; }  // consecutive polls below SL
 
-            // Trailing stop state
-            public decimal HighWaterMarkPct  { get; set; } = decimal.MinValue;
+            // Trailing stop state (USD)
+            public decimal HighWaterMarkUsd  { get; set; } = decimal.MinValue;
             public bool    TrailingActive    { get; set; }
             public bool    TrailingFired     { get; set; }
 
@@ -89,8 +90,8 @@ namespace HyperliquidScanner.Services
                     state = new SymbolState
                     {
                         InitialPnlPct  = pos.PnlPercent,
-                        HasBeenAboveSl = pos.PnlPercent > -riskConfig.SlDecimal,
-                        HasBeenBelowTp = pos.PnlPercent < riskConfig.TpDecimal,
+                        HasBeenAboveSl = pos.UnrealisedPnl > -riskConfig.SlUsd,
+                        HasBeenBelowTp = pos.UnrealisedPnl < riskConfig.TpUsd,
                         LastKnownSize  = pos.Size,
                         LastKnownEntry = pos.EntryPrice
                     };
@@ -99,7 +100,7 @@ namespace HyperliquidScanner.Services
                     if (!state.HasBeenAboveSl)
                         System.Diagnostics.Debug.WriteLine(
                             $"[Monitor] {pos.Symbol} already past SL at startup " +
-                            $"({pos.PnlPercent:P1}) — skipping auto-SL.");
+                            $"(PnL ${pos.UnrealisedPnl:F2}, SL -${riskConfig.SlUsd}) — skipping auto-SL.");
                     continue;
                 }
 
@@ -118,11 +119,11 @@ namespace HyperliquidScanner.Services
                     state.SlFired          = false;
                     state.TpFired          = false;
                     state.SlBelowPollCount = 0;
-                    state.HasBeenAboveSl   = pos.PnlPercent > -riskConfig.SlDecimal;
-                    state.HasBeenBelowTp   = pos.PnlPercent < riskConfig.TpDecimal;
+                    state.HasBeenAboveSl   = pos.UnrealisedPnl > -riskConfig.SlUsd;
+                    state.HasBeenBelowTp   = pos.UnrealisedPnl < riskConfig.TpUsd;
                     state.TrailingActive   = false;
                     state.TrailingFired    = false;
-                    state.HighWaterMarkPct = decimal.MinValue;
+                    state.HighWaterMarkUsd = decimal.MinValue;
                     state.InitialPnlPct    = pos.PnlPercent;
                     state.LastKnownSize    = pos.Size;
                     state.LastKnownEntry   = pos.EntryPrice;
@@ -138,23 +139,23 @@ namespace HyperliquidScanner.Services
                 // ── SL check ─────────────────────────────────────────────────
                 if (riskConfig.SlEnabled && !state.SlFired && state.HasBeenAboveSl)
                 {
-                    if (pos.PnlPercent <= -riskConfig.SlDecimal)
+                    if (pos.UnrealisedPnl <= -riskConfig.SlUsd)
                     {
                         state.SlBelowPollCount++;
 
                         var rsiSlope       = _rsiSlopes.GetValueOrDefault(pos.Symbol, 0m);
                         var pollsConfirmed = state.SlBelowPollCount >= riskConfig.SlConfirmationPolls;
-                        var rsiConfirmed   = rsiSlope < 0m; // momentum falling
+                        var rsiConfirmed   = rsiSlope < 0m;
 
                         System.Diagnostics.Debug.WriteLine(
-                            $"[Monitor] {pos.Symbol} SL check: polls={state.SlBelowPollCount}/" +
-                            $"{riskConfig.SlConfirmationPolls}  RSI slope={rsiSlope:F2}");
+                            $"[Monitor] {pos.Symbol} SL check: PnL ${pos.UnrealisedPnl:F2} / " +
+                            $"-${riskConfig.SlUsd}  polls={state.SlBelowPollCount}/{riskConfig.SlConfirmationPolls}");
 
                         if (pollsConfirmed && rsiConfirmed)
                         {
                             state.SlFired = true;
-                            var label = $"{pos.Symbol} SL @ -{riskConfig.SlDecimal:P0}  " +
-                                        $"ROE {pos.PnlPercent:P1}  RSI slope {rsiSlope:F1}";
+                            var label = $"{pos.Symbol} SL @ -${riskConfig.SlUsd:F2}  " +
+                                        $"PnL ${pos.UnrealisedPnl:F2}  RSI slope {rsiSlope:F1}";
                             if (isHip3)
                                 OrderFailed?.Invoke(pos.Symbol,
                                     $"⚠ SL triggered for {label} — HIP-3, manual close required");
@@ -164,25 +165,22 @@ namespace HyperliquidScanner.Services
                     }
                     else
                     {
-                        // Recovered above SL — reset consecutive poll counter
                         state.SlBelowPollCount = 0;
 
-                        // SL warning: within 20% of threshold
-                        var warningLevel = -riskConfig.SlDecimal * 0.8m;
-                        if (pos.PnlPercent <= warningLevel)
-                            SlWarning?.Invoke(pos.Symbol, pos.PnlPercent);
+                        // SL warning: within 20% of threshold (e.g. SL=$15, warn at -$12)
+                        var warningLevel = -riskConfig.SlUsd * 0.8m;
+                        if (pos.UnrealisedPnl <= warningLevel)
+                            SlWarning?.Invoke(pos.Symbol, pos.UnrealisedPnl);
                     }
                 }
 
                 // ── TP check ─────────────────────────────────────────────────
-                // Fires whenever ROE is at or above the threshold — no "must have been below"
-                // guard needed for TP (unlike SL). Being above target = take profit.
                 if (riskConfig.TpEnabled && !state.TpFired
-                    && pos.PnlPercent >= riskConfig.TpDecimal)
+                    && pos.UnrealisedPnl >= riskConfig.TpUsd)
                 {
                     state.TpFired = true;
-                    var label = $"{pos.Symbol} TP @ {riskConfig.TpDecimal:P0}  " +
-                                $"ROE {pos.PnlPercent:P1}";
+                    var label = $"{pos.Symbol} TP @ +${riskConfig.TpUsd:F2}  " +
+                                $"PnL ${pos.UnrealisedPnl:F2}";
                     if (isHip3)
                         OrderFailed?.Invoke(pos.Symbol,
                             $"🎯 TP triggered for {label} — HIP-3, manual close required");
@@ -193,31 +191,30 @@ namespace HyperliquidScanner.Services
                 // ── Trailing stop check ──────────────────────────────────────
                 if (riskConfig.TrailingEnabled && !state.TrailingFired)
                 {
-                    // Update high-water mark
-                    if (pos.PnlPercent > state.HighWaterMarkPct)
-                        state.HighWaterMarkPct = pos.PnlPercent;
+                    // Update high-water mark (USD)
+                    if (pos.UnrealisedPnl > state.HighWaterMarkUsd)
+                        state.HighWaterMarkUsd = pos.UnrealisedPnl;
 
-                    // Activate once min profit level reached (including if already above on first check)
+                    // Activate once min profit level reached
                     if (!state.TrailingActive
-                        && pos.PnlPercent >= riskConfig.TrailingMinProfitDecimal)
+                        && pos.UnrealisedPnl >= riskConfig.TrailingMinProfitUsd)
                     {
                         state.TrailingActive = true;
                         System.Diagnostics.Debug.WriteLine(
-                            $"[Monitor] {pos.Symbol} trailing ACTIVATED at {pos.PnlPercent:P1} ROE");
+                            $"[Monitor] {pos.Symbol} trailing ACTIVATED at ${pos.UnrealisedPnl:F2}");
                     }
 
                     // Fire if retrace from peak exceeds threshold
-                    if (state.TrailingActive && state.HighWaterMarkPct > decimal.MinValue)
+                    if (state.TrailingActive && state.HighWaterMarkUsd > decimal.MinValue)
                     {
-                        var retraceFromPeak = state.HighWaterMarkPct - pos.PnlPercent;
-                        if (retraceFromPeak >= riskConfig.TrailingRetraceDecimal)
+                        var retraceFromPeak = state.HighWaterMarkUsd - pos.UnrealisedPnl;
+                        if (retraceFromPeak >= riskConfig.TrailingRetraceUsd)
                         {
                             state.TrailingFired = true;
                             var label = $"{pos.Symbol} trailing stop  " +
-                                        $"peak {state.HighWaterMarkPct:P1}  " +
-                                        $"now {pos.PnlPercent:P1}  " +
-                                        $"retrace {retraceFromPeak:P1}";
-
+                                        $"peak ${state.HighWaterMarkUsd:F2}  " +
+                                        $"now ${pos.UnrealisedPnl:F2}  " +
+                                        $"retrace ${retraceFromPeak:F2}";
                             if (isHip3)
                                 OrderFailed?.Invoke(pos.Symbol,
                                     $"🔒 Trailing triggered for {label} — HIP-3, manual close required");
@@ -228,8 +225,8 @@ namespace HyperliquidScanner.Services
                 }
 
                 // Update state flags
-                if (pos.PnlPercent > -riskConfig.SlDecimal) state.HasBeenAboveSl = true;
-                if (pos.PnlPercent < riskConfig.TpDecimal)  state.HasBeenBelowTp = true;
+                if (pos.UnrealisedPnl > -riskConfig.SlUsd) state.HasBeenAboveSl = true;
+                if (pos.UnrealisedPnl < riskConfig.TpUsd)  state.HasBeenBelowTp = true;
             }
 
             // Remove state for closed positions
@@ -276,12 +273,12 @@ namespace HyperliquidScanner.Services
         /// Returns trailing stop display info: (highWaterMark, isActive, isFired).
         /// Returns null if trailing is not enabled for this symbol.
         /// </summary>
-        public (decimal hwm, bool active, bool fired)? GetTrailingInfo(string symbol)
+        public (decimal hwmUsd, bool active, bool fired)? GetTrailingInfo(string symbol)
         {
             if (!_states.TryGetValue(symbol, out var state)) return null;
             var cfg = _config.GetRiskConfig(symbol);
             if (!cfg.TrailingEnabled) return null;
-            return (state.HighWaterMarkPct, state.TrailingActive, state.TrailingFired);
+            return (state.HighWaterMarkUsd, state.TrailingActive, state.TrailingFired);
         }
 
         // ── Mini-scan: fetch RSI slope for open positions ─────────────────────

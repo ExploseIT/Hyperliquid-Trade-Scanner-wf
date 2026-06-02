@@ -135,6 +135,16 @@ namespace HyperliquidScanner.Forms
             foreach (DataGridViewColumn col in _grid.Columns)
                 col.SortMode = DataGridViewColumnSortMode.NotSortable;
 
+            // Keep all rows visually unselected
+            bool _clearingSelection = false;
+            _grid.SelectionChanged += (_, _) =>
+            {
+                if (_clearingSelection) return;
+                _clearingSelection = true;
+                _grid.ClearSelection();
+                _clearingSelection = false;
+            };
+
             _grid.CellFormatting += Grid_CellFormatting;
 
             Controls.Add(_grid);
@@ -228,32 +238,35 @@ namespace HyperliquidScanner.Forms
                 return;
             }
 
-            _header.Text = $"Open Positions — {positions.Count} open";
+            var visibleCount = positions.Count(p => !_config.GetRiskConfig(ResolveSymbol(p.Symbol)).GridViewDisabled);
+            _header.Text = $"Open Positions — {visibleCount} open" +
+                           (visibleCount < positions.Count ? $"  ({positions.Count - visibleCount} hidden)" : "");
 
             foreach (var p in positions)
             {
                 p.Symbol = ResolveSymbol(p.Symbol); // resolve HIP-3 prefix if needed
 
                 var riskCfg  = _config.GetRiskConfig(p.Symbol);
+
+                // Skip positions marked as hidden in config
+                if (riskCfg.GridViewDisabled) continue;
                 var pnlSign  = p.UnrealisedPnl >= 0 ? "+" : "";
                 var pctSign  = p.PnlPercent    >= 0 ? "+" : "";
                 var liqText  = p.LiquidationPrice.HasValue
                              ? p.LiquidationPrice.Value.ToString("G6")
                              : "–";
 
-                // SL/TP trigger prices: pnl_at_threshold = ±decimal × margin
-                // For long:  slPrice = entry - (slDecimal × margin / size)
-                // For short: slPrice = entry + (slDecimal × margin / size)
+                // SL/TP trigger prices derived from USD thresholds:
+                // pnl = (markPrice - entryPrice) × size  →  slPrice = entryPrice - (slUsd / size)
                 string slText, tpText;
-                if (p.Size > 0 && p.MarginUsed > 0 && (riskCfg.SlEnabled || riskCfg.TpEnabled))
+                if (p.Size > 0 && (riskCfg.SlEnabled || riskCfg.TpEnabled))
                 {
-                    var pnlPerUnit = p.MarginUsed / p.Size;
-                    var slPrice    = p.IsLong
-                        ? p.EntryPrice - riskCfg.SlDecimal * pnlPerUnit
-                        : p.EntryPrice + riskCfg.SlDecimal * pnlPerUnit;
-                    var tpPrice    = p.IsLong
-                        ? p.EntryPrice + riskCfg.TpDecimal * pnlPerUnit
-                        : p.EntryPrice - riskCfg.TpDecimal * pnlPerUnit;
+                    var slPrice = p.IsLong
+                        ? p.EntryPrice - riskCfg.SlUsd / p.Size
+                        : p.EntryPrice + riskCfg.SlUsd / p.Size;
+                    var tpPrice = p.IsLong
+                        ? p.EntryPrice + riskCfg.TpUsd / p.Size
+                        : p.EntryPrice - riskCfg.TpUsd / p.Size;
                     slText = riskCfg.SlEnabled ? slPrice.ToString("G6") : "–";
                     tpText = riskCfg.TpEnabled ? tpPrice.ToString("G6") : "–";
                 }
@@ -268,9 +281,9 @@ namespace HyperliquidScanner.Forms
                 var slopeStr = rsiSlope.HasValue && (riskCfg.SlEnabled || riskCfg.TpEnabled)
                     ? $" RSI↕{rsiSlope.Value:F1}"
                     : string.Empty;
-                var activeFlags = (riskCfg.SlEnabled ? "SL" : "") +
+                var activeFlags = (riskCfg.SlEnabled ? $"SL-${riskCfg.SlUsd:F0}" : "") +
                                   (riskCfg.SlEnabled && riskCfg.TpEnabled ? "+" : "") +
-                                  (riskCfg.TpEnabled ? "TP" : "");
+                                  (riskCfg.TpEnabled ? $"TP+${riskCfg.TpUsd:F0}" : "");
                 var statusText = status switch
                 {
                     SymbolRiskStatus.SlFired      => "🔴 SL fired",
@@ -285,13 +298,13 @@ namespace HyperliquidScanner.Forms
                 {
                     var trail = _monitor?.GetTrailingInfo(p.Symbol);
                     if (trail == null)
-                        trailText = $"Min {riskCfg.TrailingMinProfitDecimal * 100:F0}%";
+                        trailText = $"Min ${riskCfg.TrailingMinProfitUsd:F2}";
                     else if (trail.Value.fired)
                         trailText = "🔒 Fired";
-                    else if (trail.Value.active && trail.Value.hwm > decimal.MinValue)
-                        trailText = $"Peak {trail.Value.hwm * 100:F1}%";
+                    else if (trail.Value.active && trail.Value.hwmUsd > decimal.MinValue)
+                        trailText = $"Peak ${trail.Value.hwmUsd:F2}";
                     else
-                        trailText = $"Wait {riskCfg.TrailingMinProfitDecimal * 100:F0}%";
+                        trailText = $"Wait ${riskCfg.TrailingMinProfitUsd:F2}";
                 }
 
                 var idx = _grid.Rows.Add(

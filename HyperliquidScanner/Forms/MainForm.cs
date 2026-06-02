@@ -1006,8 +1006,9 @@ namespace HyperliquidScanner.Forms
             try
             {
                 var fresh = AppSettingsLoader.Load();
-                _scanner.Analyser.RsiLowerLowMinDropPct = fresh.RsiLowerLowMinDropPct;
-                _statusLabel.Text      = $"⟳ appsettings.json reloaded — RSI-LL min drop: {fresh.RsiLowerLowMinDropPct:P1}";
+                _scanner.Analyser.RsiLowerLowMinDropPct     = fresh.RsiLowerLowMinDropPct;
+                _scanner.Analyser.RsiLowerLowConfirmCandles = fresh.RsiLowerLowConfirmCandles;
+                _statusLabel.Text      = $"⟳ appsettings.json reloaded — RSI-LL min drop: {fresh.RsiLowerLowMinDropPct:P1}  confirm: {fresh.RsiLowerLowConfirmCandles} candle(s)";
                 _statusLabel.ForeColor = Color.FromArgb(100, 180, 255);
                 var t = new System.Windows.Forms.Timer { Interval = 5_000 };
                 t.Tick += (_, _) => { t.Stop(); t.Dispose(); _statusLabel.ForeColor = Color.Silver; };
@@ -1029,10 +1030,11 @@ namespace HyperliquidScanner.Forms
                 if (fresh == null) return;
 
                 // Update risk-related fields in-place so all existing references stay valid
-                _config.AutoRiskManagement = fresh.AutoRiskManagement;
-                _config.SymbolInfo         = fresh.SymbolInfo;
-                _config.BullishThreshold   = fresh.BullishThreshold;
-                _config.RequestDelayMs     = fresh.RequestDelayMs;
+                _config.AutoRiskManagement  = fresh.AutoRiskManagement;
+                _config.AutotradingEnabled  = fresh.AutotradingEnabled;
+                _config.SymbolInfo          = fresh.SymbolInfo;
+                _config.BullishThreshold    = fresh.BullishThreshold;
+                _config.RequestDelayMs      = fresh.RequestDelayMs;
 
                 // Reset monitor state — new thresholds apply cleanly
                 _monitor?.Reset();

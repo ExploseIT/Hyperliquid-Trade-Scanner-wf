@@ -53,6 +53,14 @@ namespace HyperliquidScanner.Models
         public bool AutoRiskManagement { get; set; } = false;
 
         /// <summary>
+        /// Master switch for all automated trading (Phase 3 auto-entry).
+        /// When false, no entry orders are placed regardless of per-symbol rsiLLAutoEntry settings.
+        /// Hot-reloadable — set to false to instantly kill all auto-trading.
+        /// </summary>
+        [JsonProperty("autotrading_enabled")]
+        public bool AutotradingEnabled { get; set; } = false;
+
+        /// <summary>
         /// Per-symbol SL/TP thresholds. Use symbol = "DEFAULT" as fallback.
         /// </summary>
         [JsonProperty("symbolInfo")]
