@@ -19,6 +19,7 @@ namespace HyperliquidScanner.Forms
         private readonly AudioPlayer? _squeezeSound;
         private readonly AudioPlayer? _cascadeSound;
         private readonly AudioPlayer? _rsiLowerLowSound;
+        private readonly AudioPlayer? _slTriggeredSound;
         private readonly AudioPlayer? _entryPlacedSound;
         private readonly AudioPlayer? _entryFilledSound;
         private readonly AutoEntryManager? _autoEntry;
@@ -74,13 +75,24 @@ namespace HyperliquidScanner.Forms
             var squeezePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
             var cascadePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.CascadeSoundFile);
             var rsiLLPath       = AppSettingsLoader.ResolveSoundPath(_appSettings.RsiLowerLowSoundFile);
+            var slTriggeredPath = AppSettingsLoader.ResolveSoundPath(_appSettings.SlTriggeredSoundFile);
             var entryPlacedPath = AppSettingsLoader.ResolveSoundPath(_appSettings.EntryPlacedSoundFile);
             var entryFilledPath = AppSettingsLoader.ResolveSoundPath(_appSettings.EntryFilledSoundFile);
             _squeezeSound       = squeezePath     != null ? new AudioPlayer(squeezePath)     : null;
             _cascadeSound       = cascadePath     != null ? new AudioPlayer(cascadePath)     : null;
             _rsiLowerLowSound   = rsiLLPath       != null ? new AudioPlayer(rsiLLPath)       : null;
-            _entryPlacedSound   = entryPlacedPath != null ? new AudioPlayer(entryPlacedPath) : null;
+            _slTriggeredSound   = slTriggeredPath  != null ? new AudioPlayer(slTriggeredPath)  : null;
+            _entryPlacedSound   = entryPlacedPath  != null ? new AudioPlayer(entryPlacedPath)  : null;
             _entryFilledSound   = entryFilledPath != null ? new AudioPlayer(entryFilledPath) : null;
+
+            // Wire SL sound alert
+            if (monitor != null)
+                monitor.SlFiredAlert += sym => BeginInvoke(() =>
+                {
+                    try { if (_slTriggeredSound != null) _slTriggeredSound.Play();
+                          else System.Media.SystemSounds.Hand.Play(); }
+                    catch { }
+                });
 
             _autoEntry = autoEntry;
             if (_autoEntry != null)

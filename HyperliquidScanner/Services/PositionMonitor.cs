@@ -57,6 +57,7 @@ namespace HyperliquidScanner.Services
         public event Action<string, string>? OrderPlaced;
         public event Action<string, string>? OrderFailed;
         public event Action<string, decimal>? SlWarning;
+        public event Action<string>?          SlFiredAlert; // fires when SL triggers — for sound alert
 
         public PositionMonitor(HyperliquidClient client, AppConfig config)
         {
@@ -166,6 +167,7 @@ namespace HyperliquidScanner.Services
                         var label = $"{pos.Symbol} SL @ -${riskConfig.SlUsd:F2}  " +
                                     $"PnL ${pos.UnrealisedPnl:F2}";
                         Log.Warning("PositionMonitor SL firing: {Label}", label);
+                        SlFiredAlert?.Invoke(pos.Symbol);
                         if (isHip3)
                             OrderFailed?.Invoke(pos.Symbol,
                                 $"⚠ SL triggered for {label} — HIP-3, manual close required");

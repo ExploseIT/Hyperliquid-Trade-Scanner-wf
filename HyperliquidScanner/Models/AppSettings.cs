@@ -26,6 +26,9 @@ namespace HyperliquidScanner.Models
         /// </summary>
         public string RsiLowerLowSoundFile { get; set; } = "";
 
+        /// <summary>Played when a SL order is triggered.</summary>
+        public string SlTriggeredSoundFile { get; set; } = "";
+
         /// <summary>Played when a Phase 3 entry limit order is placed on the exchange.</summary>
         public string EntryPlacedSoundFile { get; set; } = "";
 
