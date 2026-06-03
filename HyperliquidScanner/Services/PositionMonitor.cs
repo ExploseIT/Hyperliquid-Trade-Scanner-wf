@@ -31,14 +31,25 @@ namespace HyperliquidScanner.Services
             public decimal InitialPnlPct     { get; set; }
             public int     SlBelowPollCount  { get; set; }  // consecutive polls below SL
 
-            // Trailing stop state (USD)
+            // App-side trailing stop state (USD)
             public decimal HighWaterMarkUsd  { get; set; } = decimal.MinValue;
             public bool    TrailingActive    { get; set; }
             public bool    TrailingFired     { get; set; }
 
+            // Exchange-native ratcheting trailing stop state
+            public long    ExchangeSlOrderId { get; set; }          // OID on exchange (0 = none placed)
+            public decimal ExchangeSlPrice   { get; set; }          // current SL price on exchange
+            public decimal LastRatchetPnl    { get; set; } = decimal.MinValue; // PnL when SL last moved
+
             // DCA detection — reset state when position size or entry price changes
             public decimal LastKnownSize     { get; set; }
             public decimal LastKnownEntry    { get; set; }
+
+            // Order retry limiting
+            public int SlRetryCount       { get; set; }
+            public int TpRetryCount       { get; set; }
+            public int TrailRetryCount    { get; set; }
+            public const int MaxRetries   = 3;
         }
 
         private readonly Dictionary<string, SymbolState>     _states
@@ -139,9 +150,12 @@ namespace HyperliquidScanner.Services
                     state.SlBelowPollCount = 0;
                     state.HasBeenAboveSl   = pos.UnrealisedPnl > -riskConfig.SlUsd;
                     state.HasBeenBelowTp   = pos.UnrealisedPnl < riskConfig.TpUsd;
-                    state.TrailingActive   = false;
-                    state.TrailingFired    = false;
-                    state.HighWaterMarkUsd = decimal.MinValue;
+                    state.TrailingActive    = false;
+                    state.TrailingFired     = false;
+                    state.HighWaterMarkUsd  = decimal.MinValue;
+                    state.ExchangeSlOrderId = 0;
+                    state.ExchangeSlPrice   = 0;
+                    state.LastRatchetPnl    = decimal.MinValue;
                     state.InitialPnlPct    = pos.PnlPercent;
                     state.LastKnownSize    = pos.Size;
                     state.LastKnownEntry   = pos.EntryPrice;
@@ -235,15 +249,32 @@ namespace HyperliquidScanner.Services
                     }
                 }
 
+                // ── Exchange ratcheting trailing stop ─────────────────────────
+                if (riskConfig.ExchangeTrailingEnabled && !state.TrailingFired)
+                    await UpdateExchangeTrailingSlAsync(pos, riskConfig, state, ct);
+
                 // Update state flags
                 if (pos.UnrealisedPnl > -riskConfig.SlUsd) state.HasBeenAboveSl = true;
                 if (pos.UnrealisedPnl < riskConfig.TpUsd)  state.HasBeenBelowTp = true;
             }
 
-            // Remove state for closed positions
+            // Remove state for closed positions — cancel any exchange SL orders
             var open = positions.Select(p => p.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var key in _states.Keys.Where(k => !open.Contains(k)).ToList())
+            {
+                var closedState = _states[key];
+                if (closedState.ExchangeSlOrderId != 0)
+                {
+                    var assetInfo = _client.GetAssetIndex(key);
+                    if (assetInfo != null)
+                    {
+                        await _client.CancelOrderAsync(assetInfo.Value.index,
+                            closedState.ExchangeSlOrderId, ct);
+                        Log.Information("Cancelled exchange SL for closed position {Symbol}", key);
+                    }
+                }
                 _states.Remove(key);
+            }
 
             // After first full cycle, any new positions are session-opened
             _startupComplete = true;
@@ -282,6 +313,19 @@ namespace HyperliquidScanner.Services
         /// <summary>Returns the latest RSI slope for a symbol (for display in positions panel).</summary>
         public decimal GetRsiSlope(string symbol) =>
             _rsiSlopes.GetValueOrDefault(symbol, 0m);
+
+        /// <summary>
+        /// Returns exchange trailing SL info: (slPrice, isActive).
+        /// Returns null if exchange trailing is not enabled or not yet placed.
+        /// </summary>
+        public (decimal slPrice, bool active)? GetExchangeTrailingInfo(string symbol)
+        {
+            if (!_states.TryGetValue(symbol, out var state)) return null;
+            var cfg = _config.GetRiskConfig(symbol);
+            if (!cfg.ExchangeTrailingEnabled) return null;
+            if (state.ExchangeSlOrderId == 0) return (0, false);
+            return (state.ExchangeSlPrice, true);
+        }
 
         /// <summary>
         /// Returns trailing stop display info: (highWaterMark, isActive, isFired).
@@ -372,8 +416,18 @@ namespace HyperliquidScanner.Services
             }
             else
             {
-                Log.Error("SL FAILED for {Label}: {Msg}", label, msg);
-                OrderFailed?.Invoke(pos.Symbol, $"SL FAILED for {label}: {msg}");
+                var s = _states.GetValueOrDefault(pos.Symbol);
+                if (s != null && ++s.SlRetryCount < SymbolState.MaxRetries)
+                {
+                    s.SlFired = false; // retry
+                    Log.Warning("SL FAILED (attempt {N}): {Msg}", s.SlRetryCount, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"SL failed attempt {s.SlRetryCount}: {msg}");
+                }
+                else
+                {
+                    Log.Error("SL FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"SL FAILED permanently for {label} — manual close required");
+                }
             }
         }
 
@@ -408,8 +462,81 @@ namespace HyperliquidScanner.Services
             }
             else
             {
-                Log.Error("TP FAILED for {Label}: {Msg}", label, msg);
-                OrderFailed?.Invoke(pos.Symbol, $"TP FAILED for {label}: {msg}");
+                var s = _states.GetValueOrDefault(pos.Symbol);
+                if (s != null && ++s.TpRetryCount < SymbolState.MaxRetries)
+                {
+                    s.TpFired = false; // retry
+                    Log.Warning("TP FAILED (attempt {N}): {Msg}", s.TpRetryCount, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"TP failed attempt {s.TpRetryCount}: {msg}");
+                }
+                else
+                {
+                    Log.Error("TP FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"TP FAILED permanently for {label} — manual close required");
+                }
+            }
+        }
+
+        private async Task UpdateExchangeTrailingSlAsync(
+            PositionInfo pos, SymbolRiskConfig cfg, SymbolState state, CancellationToken ct)
+        {
+            // Not yet profitable enough to activate
+            if (pos.UnrealisedPnl < cfg.TrailingMinProfitUsd) return;
+
+            // Check if we need to place or ratchet the SL
+            bool shouldRatchet = state.ExchangeSlOrderId == 0           // not placed yet
+                || pos.UnrealisedPnl >= state.LastRatchetPnl + cfg.TrailingStepUsd; // new peak
+
+            if (!shouldRatchet) return;
+
+            var assetInfo = _client.GetAssetIndex(pos.Symbol);
+            if (assetInfo == null) return;
+            var (assetIndex, szDec) = assetInfo.Value;
+
+            // Calculate new SL price: retrace amount below current mark
+            var newSlPrice = pos.IsLong
+                ? pos.MarkPrice - cfg.TrailingRetraceUsd / pos.Size
+                : pos.MarkPrice + cfg.TrailingRetraceUsd / pos.Size;
+
+            // Only ratchet in the favourable direction (never move SL against position)
+            if (state.ExchangeSlOrderId != 0)
+            {
+                bool slImproved = pos.IsLong
+                    ? newSlPrice > state.ExchangeSlPrice   // long: new SL must be higher
+                    : newSlPrice < state.ExchangeSlPrice;  // short: new SL must be lower
+                if (!slImproved) return;
+
+                // Cancel existing SL before placing new one
+                var (cancelOk, _) = await _client.CancelOrderAsync(assetIndex,
+                    state.ExchangeSlOrderId, ct);
+                if (!cancelOk)
+                {
+                    Log.Warning("ExchangeTrailing: failed to cancel SL oid={Oid} for {Symbol}",
+                        state.ExchangeSlOrderId, pos.Symbol);
+                }
+                state.ExchangeSlOrderId = 0;
+            }
+
+            // Place new SL trigger on exchange
+            var (ok, msg, oid) = await _client.PlaceTriggerOrderAsync(
+                pos.Symbol, !pos.IsLong, newSlPrice, newSlPrice,
+                pos.Size, szDec, "sl", true, ct);
+
+            if (ok)
+            {
+                state.ExchangeSlOrderId = oid;
+                state.ExchangeSlPrice   = newSlPrice;
+                state.LastRatchetPnl    = pos.UnrealisedPnl;
+                Log.Information(
+                    "ExchangeTrailing ratchet: {Symbol} SL → {SlPrice:G6}  PnL=${Pnl:F2}  oid={Oid}",
+                    pos.Symbol, newSlPrice, pos.UnrealisedPnl, oid);
+                OrderPlaced?.Invoke(pos.Symbol,
+                    $"📌 Exchange SL ratcheted: {pos.Symbol} → ${newSlPrice:G6}");
+            }
+            else
+            {
+                Log.Warning("ExchangeTrailing: failed to place SL for {Symbol}: {Msg}",
+                    pos.Symbol, msg);
             }
         }
 
@@ -445,8 +572,18 @@ namespace HyperliquidScanner.Services
             }
             else
             {
-                Log.Error("Trailing FAILED for {Label}: {Msg}", label, msg);
-                OrderFailed?.Invoke(pos.Symbol, $"Trailing FAILED for {label}: {msg}");
+                var s = _states.GetValueOrDefault(pos.Symbol);
+                if (s != null && ++s.TrailRetryCount < SymbolState.MaxRetries)
+                {
+                    s.TrailingFired = false; // retry
+                    Log.Warning("Trailing FAILED (attempt {N}): {Msg}", s.TrailRetryCount, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"Trailing failed attempt {s.TrailRetryCount}: {msg}");
+                }
+                else
+                {
+                    Log.Error("Trailing FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"Trailing FAILED permanently for {label} — manual close required");
+                }
             }
         }
     }

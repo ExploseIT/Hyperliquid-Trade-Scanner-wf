@@ -71,6 +71,22 @@ namespace HyperliquidScanner.Models
         [JsonProperty("trailingSizeDecimal")]
         public decimal TrailingSizeDecimal { get; set; } = 1.0m;
 
+        /// <summary>
+        /// Enable exchange-native ratcheting trailing stop.
+        /// Places and updates a real SL trigger order on Hyperliquid as PnL grows.
+        /// Persists when the app is closed — survives restarts.
+        /// Uses trailingMinProfitUsd to activate and trailingRetraceUsd for the SL distance.
+        /// </summary>
+        [JsonProperty("exchangeTrailing_enabled")]
+        public bool ExchangeTrailingEnabled { get; set; } = false;
+
+        /// <summary>
+        /// How much additional PnL growth (USD) triggers a SL ratchet.
+        /// e.g. 5 = move the exchange SL every time PnL grows another $5.
+        /// </summary>
+        [JsonProperty("trailingStepUsd")]
+        public decimal TrailingStepUsd { get; set; } = 5m;
+
         // ── Phase 3: RSI-LL auto-entry ────────────────────────────────────────
 
         /// <summary>Enable automatic entry on RSI Lower Low signal for this symbol.</summary>

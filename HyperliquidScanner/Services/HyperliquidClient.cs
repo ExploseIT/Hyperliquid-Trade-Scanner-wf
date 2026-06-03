@@ -528,21 +528,36 @@ namespace HyperliquidScanner.Services
                 };
 
                 var json     = JsonConvert.SerializeObject(body);
+                Log.Debug("PlaceOrder debug: asset={A} isBuy={B} price={P} size={S} tif={T} nonce={N}",
+                    assetIndex, isBuy, priceStr, sizeStr, tif, nonce);
+                Log.Debug("PlaceOrder request body: {Json}", json);
                 var content  = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 var response = await _http.PostAsync("/exchange", content, ct);
                 var respBody = await response.Content.ReadAsStringAsync(ct);
+                Log.Debug("PlaceOrder response: {Resp}", respBody);
 
                 var parsed = JToken.Parse(respBody);
                 var status = parsed["status"]?.Value<string>();
 
                 if (status == "ok")
                 {
-                    var oid = parsed["response"]?["data"]?["statuses"]?[0]?["resting"]?["oid"]
+                    // response["data"]["statuses"][0] can be "resting" (GTC) or "filled" (IOC)
+                    long oid = 0;
+                    try
+                    {
+                        var responseObj = parsed["response"] as JObject;
+                        oid = responseObj?["data"]?["statuses"]?[0]?["resting"]?["oid"]
                               ?.Value<long>() ?? 0;
+                    }
+                    catch { /* IOC orders fill immediately — no oid */ }
                     return (true, $"Order placed: {(isBuy ? "Buy" : "Sell")} {sizeStr} {symbol} @ {priceStr}", oid);
                 }
 
-                var error = parsed["response"]?["data"]?.ToString() ?? respBody;
+                // response may be a string on error, not an object — handle both
+                var responseToken = parsed["response"];
+                var error = responseToken is JObject ro
+                    ? ro["data"]?.ToString() ?? respBody
+                    : responseToken?.ToString() ?? respBody;
                 return (false, $"Order rejected: {error}", 0);
             }
             catch (Exception ex)
@@ -671,11 +686,12 @@ namespace HyperliquidScanner.Services
                 var parsed   = JToken.Parse(respBody);
                 if (parsed["status"]?.Value<string>() == "ok")
                 {
-                    var oid = parsed["response"]?["data"]?["statuses"]?[0]?["resting"]?["oid"]
-                              ?.Value<long>() ?? 0;
+                    long oid = 0;
+                    try { oid = (parsed["response"] as JObject)?["data"]?["statuses"]?[0]?["resting"]?["oid"]?.Value<long>() ?? 0; }
+                    catch { }
                     return (true, $"Trigger {tpsl} placed", oid);
                 }
-                return (false, parsed.ToString(), 0);
+                return (false, parsed["response"]?.ToString() ?? parsed.ToString(), 0);
             }
             catch (Exception ex) { return (false, ex.Message, 0); }
         }

@@ -15,7 +15,7 @@ namespace HyperliquidScanner.Utils
             Directory.CreateDirectory(logDir);
 
             Log.Logger = new LoggerConfiguration()
-                .MinimumLevel.Information()
+                .MinimumLevel.Debug()
                 .WriteTo.File(
                     path: Path.Combine(logDir, "scanner-.log"),
                     rollingInterval: RollingInterval.Day,

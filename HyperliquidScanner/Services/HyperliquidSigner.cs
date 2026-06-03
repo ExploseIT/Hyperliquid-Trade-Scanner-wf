@@ -52,8 +52,19 @@ namespace HyperliquidScanner.Services
             var nonceBytes = BitConverter.GetBytes((ulong)nonce);
             if (BitConverter.IsLittleEndian) Array.Reverse(nonceBytes);
 
-            var data       = actionBytes.Concat(nonceBytes).Append((byte)0x00).ToArray();
+            var data         = actionBytes.Concat(nonceBytes).Append((byte)0x00).ToArray();
             var connectionId = KeccakRaw(data);  // 32 bytes
+
+            // Debug: log intermediate values to compare with Python SDK
+            Serilog.Log.Debug("Sign debug: actionBytes={A} nonce={N} connectionId={C}",
+                BitConverter.ToString(actionBytes).Replace("-","").ToLower(),
+                nonce,
+                BitConverter.ToString(connectionId).Replace("-","").ToLower());
+
+            // Log domain separator (static, computed once)
+            Serilog.Log.Debug("Sign debug: domainSep={D} agentTypeHash={T}",
+                BitConverter.ToString(DomainSeparator).Replace("-","").ToLower(),
+                BitConverter.ToString(AgentTypeHash).Replace("-","").ToLower());
 
             // Step 4: EIP-712 struct hash for Agent
             var source     = isMainnet ? "a" : "b";
@@ -69,6 +80,10 @@ namespace HyperliquidScanner.Services
                     .Concat(DomainSeparator)
                     .Concat(structHash)
                     .ToArray());
+
+            Serilog.Log.Debug("Sign debug: structHash={SH} finalDigest={D}",
+                BitConverter.ToString(structHash).Replace("-","").ToLower(),
+                BitConverter.ToString(digest).Replace("-","").ToLower());
 
             // Step 6: sign
             var key = new EthECKey(privateKey);

@@ -290,8 +290,18 @@ namespace HyperliquidScanner.Forms
 
                 // Trail column: show high-water mark and activation state
                 string trailText = "–";
-                if (riskCfg.TrailingEnabled)
+                if (riskCfg.ExchangeTrailingEnabled)
                 {
+                    // Exchange-native ratcheting trailing
+                    var exTrail = _monitor?.GetExchangeTrailingInfo(p.Symbol);
+                    if (exTrail == null || !exTrail.Value.active)
+                        trailText = $"📌 Wait ${riskCfg.TrailingMinProfitUsd:F2}";
+                    else
+                        trailText = $"📌 SL ${exTrail.Value.slPrice:G6}";
+                }
+                else if (riskCfg.TrailingEnabled)
+                {
+                    // App-side trailing
                     var trail = _monitor?.GetTrailingInfo(p.Symbol);
                     if (trail == null)
                         trailText = $"Min ${riskCfg.TrailingMinProfitUsd:F2}";
