@@ -11,6 +11,16 @@ namespace HyperliquidScanner
         [STAThread]
         static void Main()
         {
+            // Single-instance guard — prevent two copies running simultaneously
+            using var mutex = new System.Threading.Mutex(true, "HyperliquidScanner_SingleInstance",
+                out bool isNewInstance);
+            if (!isNewInstance)
+            {
+                MessageBox.Show("Hyperliquid Scanner is already running.",
+                    "Already Running", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             AppLogger.Initialise();
             ApplicationConfiguration.Initialize();
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
