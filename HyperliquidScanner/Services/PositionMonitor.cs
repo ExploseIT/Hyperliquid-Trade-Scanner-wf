@@ -44,6 +44,10 @@ namespace HyperliquidScanner.Services
         private readonly Dictionary<string, SymbolState>     _states
             = new(StringComparer.OrdinalIgnoreCase);
 
+        // After first position check completes, new positions are session-opened
+        // and should have SL active immediately regardless of current PnL
+        private bool _startupComplete = false;
+
         // Latest RSI slope per symbol from the mini-scan (negative = falling)
         private readonly Dictionary<string, decimal> _rsiSlopes
             = new(StringComparer.OrdinalIgnoreCase);
@@ -88,10 +92,16 @@ namespace HyperliquidScanner.Services
                 // First observation — initialise state, don't act yet
                 if (!_states.TryGetValue(pos.Symbol, out var state))
                 {
+                    // Startup positions: respect current PnL (don't fire if already past SL)
+                    // Session-opened positions: always activate SL immediately
+                    bool hasBeenAboveSl = _startupComplete
+                        ? true                                        // new position during session → SL always active
+                        : pos.UnrealisedPnl > -riskConfig.SlUsd;     // startup position → only if above threshold
+
                     state = new SymbolState
                     {
                         InitialPnlPct  = pos.PnlPercent,
-                        HasBeenAboveSl = pos.UnrealisedPnl > -riskConfig.SlUsd,
+                        HasBeenAboveSl = hasBeenAboveSl,
                         HasBeenBelowTp = pos.UnrealisedPnl < riskConfig.TpUsd,
                         LastKnownSize  = pos.Size,
                         LastKnownEntry = pos.EntryPrice
@@ -232,6 +242,9 @@ namespace HyperliquidScanner.Services
             var open = positions.Select(p => p.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var key in _states.Keys.Where(k => !open.Contains(k)).ToList())
                 _states.Remove(key);
+
+            // After first full cycle, any new positions are session-opened
+            _startupComplete = true;
         }
 
         /// <summary>

@@ -161,33 +161,32 @@ namespace HyperliquidScanner.Forms
                 // ── Fetch fresh data (skipped during scans to avoid 429s) ──────
                 if (!_scanInProgress)
                 {
+                    // Fetch fresh position data — skipped during scans to avoid 429s
                     var positions = await _client.GetPositionsAsync(ct);
 
                     if (positions.Count == 0 && _positions.Count > 0)
                     {
                         _emptyResponseCount++;
-                        // Keep last known grid if transiently empty
-                        if (_emptyResponseCount < EmptyResponseThreshold)
-                            goto RunMonitor;
+                        if (_emptyResponseCount >= EmptyResponseThreshold)
+                            _positions = positions; // genuinely empty — clear
+                        // else keep cached data, still fall through to grid update
                     }
                     else
                     {
                         _emptyResponseCount = 0;
                         _positions = positions;
                     }
-
-                    if (IsHandleCreated && !IsDisposed)
-                        BeginInvoke(() =>
-                        {
-                            UpdateGrid(_positions);
-                            PositionsRefreshed?.Invoke(_positions);
-                        });
                 }
 
-                // ── Always run monitor against cached data ────────────────────
-                // Trailing/TP/SL must keep ticking every 5s even during asset scans.
-                // No API calls needed here — uses last known _positions PnL values.
-                RunMonitor:
+                // Always refresh grid from cached data — even during scans
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(() =>
+                    {
+                        UpdateGrid(_positions);
+                        PositionsRefreshed?.Invoke(_positions);
+                    });
+
+                // Always run monitor against cached data — trailing/TP/SL keep ticking
                 if (_monitor != null && _positions.Count > 0)
                     await _monitor.CheckPositionsAsync(_positions, ct);
             }

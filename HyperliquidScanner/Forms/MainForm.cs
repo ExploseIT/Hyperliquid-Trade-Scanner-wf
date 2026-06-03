@@ -605,6 +605,10 @@ namespace HyperliquidScanner.Forms
             finally
             {
                 SetScanning(false);
+                // Immediately refresh positions after scan completes so new positions
+                // opened during the scan appear without waiting for the next timer tick
+                if (_positionsPanel != null)
+                    _ = _positionsPanel.RefreshAsync();
             }
         }
 
