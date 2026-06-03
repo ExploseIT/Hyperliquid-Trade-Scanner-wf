@@ -158,41 +158,38 @@ namespace HyperliquidScanner.Forms
         {
             try
             {
-                // Skip mini-scan API calls while a full scan is running to avoid rate limiting
-                if (_scanInProgress) return;
-
-                var positions = await _client.GetPositionsAsync(ct);
-
-                // Guard: if we get an empty response but previously had positions,
-                // require several consecutive empty responses before clearing the grid.
-                // This prevents transient API failures during scans from wiping the display.
-                if (positions.Count == 0 && _positions.Count > 0)
+                // ── Fetch fresh data (skipped during scans to avoid 429s) ──────
+                if (!_scanInProgress)
                 {
-                    _emptyResponseCount++;
-                    if (_emptyResponseCount < EmptyResponseThreshold)
+                    var positions = await _client.GetPositionsAsync(ct);
+
+                    if (positions.Count == 0 && _positions.Count > 0)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[PositionsPanel] empty response {_emptyResponseCount}/{EmptyResponseThreshold} — keeping last known positions");
-                        return;
+                        _emptyResponseCount++;
+                        // Keep last known grid if transiently empty
+                        if (_emptyResponseCount < EmptyResponseThreshold)
+                            goto RunMonitor;
                     }
+                    else
+                    {
+                        _emptyResponseCount = 0;
+                        _positions = positions;
+                    }
+
+                    if (IsHandleCreated && !IsDisposed)
+                        BeginInvoke(() =>
+                        {
+                            UpdateGrid(_positions);
+                            PositionsRefreshed?.Invoke(_positions);
+                        });
                 }
-                else
-                {
-                    _emptyResponseCount = 0;
-                }
 
-                _positions = positions;
-
-                // Run risk monitor checks (fires SL/TP orders if thresholds crossed)
-                if (_monitor != null)
-                    await _monitor.CheckPositionsAsync(positions, ct);
-
-                if (!IsHandleCreated || IsDisposed) return;
-                BeginInvoke(() =>
-                {
-                    UpdateGrid(positions);
-                    PositionsRefreshed?.Invoke(positions);
-                });
+                // ── Always run monitor against cached data ────────────────────
+                // Trailing/TP/SL must keep ticking every 5s even during asset scans.
+                // No API calls needed here — uses last known _positions PnL values.
+                RunMonitor:
+                if (_monitor != null && _positions.Count > 0)
+                    await _monitor.CheckPositionsAsync(_positions, ct);
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)

@@ -143,39 +143,28 @@ namespace HyperliquidScanner.Services
                     state.LastKnownEntry = pos.EntryPrice;
                 }
 
-                // ── SL check ─────────────────────────────────────────────────
+                // ── SL check — pure threshold crossing ───────────────────────
+                // Fires immediately when UnrealisedPnl crosses below -slUsd.
+                // No RSI or poll confirmation — clean and fast.
+                // HasBeenAboveSl ensures we only fire on a fresh crossing,
+                // not on positions already past the threshold at startup.
                 if (riskConfig.SlEnabled && !state.SlFired && state.HasBeenAboveSl)
                 {
                     if (pos.UnrealisedPnl <= -riskConfig.SlUsd)
                     {
-                        state.SlBelowPollCount++;
-
-                        var rsiSlope       = _rsiSlopes.GetValueOrDefault(pos.Symbol, 0m);
-                        var pollsConfirmed = state.SlBelowPollCount >= riskConfig.SlConfirmationPolls;
-                        var rsiConfirmed   = rsiSlope < 0m;
-
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[Monitor] {pos.Symbol} SL check: PnL ${pos.UnrealisedPnl:F2} / " +
-                            $"-${riskConfig.SlUsd}  polls={state.SlBelowPollCount}/{riskConfig.SlConfirmationPolls}");
-
-                        if (pollsConfirmed && rsiConfirmed)
-                        {
-                            state.SlFired = true;
-                            var label = $"{pos.Symbol} SL @ -${riskConfig.SlUsd:F2}  " +
-                                        $"PnL ${pos.UnrealisedPnl:F2}  RSI slope {rsiSlope:F1}";
-                            Log.Warning("PositionMonitor SL firing: {Label}", label);
-                            if (isHip3)
-                                OrderFailed?.Invoke(pos.Symbol,
-                                    $"⚠ SL triggered for {label} — HIP-3, manual close required");
-                            else
-                                await TriggerSlAsync(pos, riskConfig, label, ct);
-                        }
+                        state.SlFired = true;
+                        var label = $"{pos.Symbol} SL @ -${riskConfig.SlUsd:F2}  " +
+                                    $"PnL ${pos.UnrealisedPnl:F2}";
+                        Log.Warning("PositionMonitor SL firing: {Label}", label);
+                        if (isHip3)
+                            OrderFailed?.Invoke(pos.Symbol,
+                                $"⚠ SL triggered for {label} — HIP-3, manual close required");
+                        else
+                            await TriggerSlAsync(pos, riskConfig, label, ct);
                     }
                     else
                     {
-                        state.SlBelowPollCount = 0;
-
-                        // SL warning: within 20% of threshold (e.g. SL=$15, warn at -$12)
+                        // SL warning: within 20% of threshold
                         var warningLevel = -riskConfig.SlUsd * 0.8m;
                         if (pos.UnrealisedPnl <= warningLevel)
                             SlWarning?.Invoke(pos.Symbol, pos.UnrealisedPnl);
