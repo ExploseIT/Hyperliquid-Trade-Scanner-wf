@@ -473,9 +473,24 @@ namespace HyperliquidScanner.Services
             return (ok, msg);
         }
 
+        /// <summary>
+        /// Places a market entry order (NOT reduce-only) at ±5% of mark price.
+        /// isBuy=true for longs, isBuy=false for shorts.
+        /// </summary>
+        public async Task<(bool ok, string message)> PlaceMarketEntryAsync(
+            string symbol, bool isBuy, decimal markPrice, decimal size,
+            int szDecimals, CancellationToken ct = default)
+        {
+            var aggressivePrice = isBuy ? markPrice * 1.05m : markPrice * 0.95m;
+            var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size,
+                                    szDecimals, "Ioc", ct, reduceOnly: false);
+            return (ok, msg);
+        }
+
         private async Task<(bool ok, string message, long orderId)> PlaceOrderAsync(
             string symbol, bool isBuy, decimal price, decimal size,
-            int szDecimals, string tif, CancellationToken ct)
+            int szDecimals, string tif, CancellationToken ct,
+            bool reduceOnly = true, string? vaultAddress = null)
         {
             if (!_config.HasPrivateKey)
                 return (false, "No private key configured — cannot place orders.", 0);
@@ -496,7 +511,7 @@ namespace HyperliquidScanner.Services
             {
                 // Serialise action to msgpack
                 var actionBytes = HyperliquidSigner.SerializeLimitOrder(
-                    assetIndex, isBuy, priceStr, sizeStr, reduceOnly: true, tif);
+                    assetIndex, isBuy, priceStr, sizeStr, reduceOnly, tif);
 
                 // Sign
                 var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
@@ -513,21 +528,14 @@ namespace HyperliquidScanner.Services
                             b = isBuy,
                             p = priceStr,
                             s = sizeStr,
-                            r = true,  // reduceOnly
+                            r = reduceOnly,
                             t = new { limit = new { tif } }
                         }
                     },
                     grouping = "na"
                 };
 
-                var body = new
-                {
-                    action,
-                    nonce,
-                    signature = new { r, s, v }
-                };
-
-                var json     = JsonConvert.SerializeObject(body);
+                var json = JsonConvert.SerializeObject(new { action, nonce, signature = new { r, s, v } });
                 Log.Debug("PlaceOrder debug: asset={A} isBuy={B} price={P} size={S} tif={T} nonce={N}",
                     assetIndex, isBuy, priceStr, sizeStr, tif, nonce);
                 Log.Debug("PlaceOrder request body: {Json}", json);
@@ -535,6 +543,9 @@ namespace HyperliquidScanner.Services
                 var response = await _http.PostAsync("/exchange", content, ct);
                 var respBody = await response.Content.ReadAsStringAsync(ct);
                 Log.Debug("PlaceOrder response: {Resp}", respBody);
+
+                if (string.IsNullOrWhiteSpace(respBody))
+                    return (false, "Empty response from exchange — likely rate limited, retry in a moment", 0);
 
                 var parsed = JToken.Parse(respBody);
                 var status = parsed["status"]?.Value<string>();

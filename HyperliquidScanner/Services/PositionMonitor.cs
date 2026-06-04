@@ -41,9 +41,10 @@ namespace HyperliquidScanner.Services
             public decimal ExchangeSlPrice   { get; set; }          // current SL price on exchange
             public decimal LastRatchetPnl    { get; set; } = decimal.MinValue; // PnL when SL last moved
 
-            // DCA detection — reset state when position size or entry price changes
+            // DCA / new-position detection
             public decimal LastKnownSize     { get; set; }
             public decimal LastKnownEntry    { get; set; }
+            public bool    LastKnownIsLong   { get; set; }  // side flip → always a new position
 
             // Order retry limiting
             public int SlRetryCount       { get; set; }
@@ -53,6 +54,11 @@ namespace HyperliquidScanner.Services
         }
 
         private readonly Dictionary<string, SymbolState>     _states
+            = new(StringComparer.OrdinalIgnoreCase);
+
+        // Symbols present in the previous poll cycle — used to detect close+reopen
+        // across cycles (symbol absent for ≥1 cycle then reappears → force fresh state)
+        private HashSet<string> _prevCycleSymbols
             = new(StringComparer.OrdinalIgnoreCase);
 
         // After first position check completes, new positions are session-opened
@@ -101,6 +107,15 @@ namespace HyperliquidScanner.Services
                 var isHip3     = pos.Symbol.Contains(':');
                 var riskConfig = _config.GetRiskConfig(pos.Symbol);
 
+                // Force fresh state if the symbol was absent for at least one poll cycle
+                // (position closed and reopened between cycles — catches manual close+reopen)
+                if (_states.ContainsKey(pos.Symbol) && !_prevCycleSymbols.Contains(pos.Symbol))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Monitor] {pos.Symbol} absent last cycle then reappeared — resetting state (new position).");
+                    _states.Remove(pos.Symbol);
+                }
+
                 // First observation — initialise state, don't act yet
                 if (!_states.TryGetValue(pos.Symbol, out var state))
                 {
@@ -112,11 +127,12 @@ namespace HyperliquidScanner.Services
 
                     state = new SymbolState
                     {
-                        InitialPnlPct  = pos.PnlPercent,
-                        HasBeenAboveSl = hasBeenAboveSl,
-                        HasBeenBelowTp = pos.UnrealisedPnl < riskConfig.TpUsd,
-                        LastKnownSize  = pos.Size,
-                        LastKnownEntry = pos.EntryPrice
+                        InitialPnlPct    = pos.PnlPercent,
+                        HasBeenAboveSl   = hasBeenAboveSl,
+                        HasBeenBelowTp   = pos.UnrealisedPnl < riskConfig.TpUsd,
+                        LastKnownSize    = pos.Size,
+                        LastKnownEntry   = pos.EntryPrice,
+                        LastKnownIsLong  = pos.IsLong
                     };
                     _states[pos.Symbol] = state;
                     Log.Information(
@@ -131,6 +147,16 @@ namespace HyperliquidScanner.Services
                             $"[Monitor] {pos.Symbol} already past SL at startup " +
                             $"(PnL ${pos.UnrealisedPnl:F2}, SL -${riskConfig.SlUsd}) — skipping auto-SL.");
                     continue;
+                }
+
+                // New position detection — side flip always means a new position
+                bool isSideFlip = pos.IsLong != state.LastKnownIsLong;
+                if (isSideFlip)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Monitor] {pos.Symbol} side flipped ({(state.LastKnownIsLong ? "Long" : "Short")}→{(pos.IsLong ? "Long" : "Short")}) — resetting state (new position).");
+                    _states.Remove(pos.Symbol);
+                    continue; // fresh state created on next cycle
                 }
 
                 // DCA detection — size increased or entry price changed → reset state
@@ -159,13 +185,15 @@ namespace HyperliquidScanner.Services
                     state.InitialPnlPct    = pos.PnlPercent;
                     state.LastKnownSize    = pos.Size;
                     state.LastKnownEntry   = pos.EntryPrice;
+                    state.LastKnownIsLong  = pos.IsLong;
                     // Don't skip — process this observation with fresh state
                 }
                 else
                 {
                     // Update for next cycle
-                    state.LastKnownSize  = pos.Size;
-                    state.LastKnownEntry = pos.EntryPrice;
+                    state.LastKnownSize    = pos.Size;
+                    state.LastKnownEntry   = pos.EntryPrice;
+                    state.LastKnownIsLong  = pos.IsLong;
                 }
 
                 // ── SL check — pure threshold crossing ───────────────────────
@@ -276,6 +304,10 @@ namespace HyperliquidScanner.Services
                 _states.Remove(key);
             }
 
+            // Snapshot the symbols seen this cycle — used next cycle to detect close+reopen
+            _prevCycleSymbols = positions.Select(p => p.Symbol)
+                                         .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             // After first full cycle, any new positions are session-opened
             _startupComplete = true;
         }
@@ -285,6 +317,12 @@ namespace HyperliquidScanner.Services
         /// TpFired and TrailingFired are intentionally preserved — a TP/trail that already
         /// fired should not re-fire just because the config was saved again.
         /// </summary>
+        /// <summary>
+        /// Completely removes all state for a symbol — call immediately after a manual close
+        /// so any new position on the same symbol starts with a clean slate.
+        /// </summary>
+        public void ClearSymbol(string symbol) => _states.Remove(symbol);
+
         public void Reset()
         {
             foreach (var state in _states.Values)

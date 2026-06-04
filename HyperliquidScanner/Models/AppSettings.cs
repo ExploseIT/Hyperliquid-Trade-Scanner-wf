@@ -48,5 +48,11 @@ namespace HyperliquidScanner.Models
         /// before the signal fires. Default 1. Set to 2 for 15m to filter fakeouts.
         /// </summary>
         public int RsiLowerLowConfirmCandles { get; set; } = 1;
+
+        /// <summary>
+        /// Master volume for all alert sounds. 1.0 = full volume, 0.25 = quarter volume.
+        /// Hot-reloadable — takes effect on the next sound played after appsettings.json is saved.
+        /// </summary>
+        public float SoundVolume { get; set; } = 1.0f;
     }
 }

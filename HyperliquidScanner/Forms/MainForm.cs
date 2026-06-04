@@ -84,6 +84,7 @@ namespace HyperliquidScanner.Forms
             _slTriggeredSound   = slTriggeredPath  != null ? new AudioPlayer(slTriggeredPath)  : null;
             _entryPlacedSound   = entryPlacedPath  != null ? new AudioPlayer(entryPlacedPath)  : null;
             _entryFilledSound   = entryFilledPath != null ? new AudioPlayer(entryFilledPath) : null;
+            ApplySoundVolume(_appSettings.SoundVolume);
 
             // Wire SL sound alert
             if (monitor != null)
@@ -1061,6 +1062,13 @@ namespace HyperliquidScanner.Forms
             return null;
         }
 
+        private void ApplySoundVolume(float volume)
+        {
+            foreach (var player in new[] { _squeezeSound, _cascadeSound, _rsiLowerLowSound,
+                                           _slTriggeredSound, _entryPlacedSound, _entryFilledSound })
+                if (player != null) player.Volume = volume;
+        }
+
         private void ReloadAppSettings()
         {
             try
@@ -1068,7 +1076,8 @@ namespace HyperliquidScanner.Forms
                 var fresh = AppSettingsLoader.Load();
                 _scanner.Analyser.RsiLowerLowMinDropPct     = fresh.RsiLowerLowMinDropPct;
                 _scanner.Analyser.RsiLowerLowConfirmCandles = fresh.RsiLowerLowConfirmCandles;
-                _statusLabel.Text      = $"⟳ appsettings.json reloaded — RSI-LL min drop: {fresh.RsiLowerLowMinDropPct:P1}  confirm: {fresh.RsiLowerLowConfirmCandles} candle(s)";
+                ApplySoundVolume(fresh.SoundVolume);
+                _statusLabel.Text      = $"⟳ appsettings.json reloaded — RSI-LL min drop: {fresh.RsiLowerLowMinDropPct:P1}  confirm: {fresh.RsiLowerLowConfirmCandles} candle(s)  vol: {fresh.SoundVolume:P0}";
                 _statusLabel.ForeColor = Color.FromArgb(100, 180, 255);
                 var t = new System.Windows.Forms.Timer { Interval = 5_000 };
                 t.Tick += (_, _) => { t.Stop(); t.Dispose(); _statusLabel.ForeColor = Color.Silver; };

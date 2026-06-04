@@ -10,6 +10,9 @@ namespace HyperliquidScanner.Utils
     {
         private readonly string _filePath;
 
+        /// <summary>Master volume: 0.0 (silent) to 1.0 (full). Hot-reloadable — updated between plays.</summary>
+        public float Volume { get; set; } = 1.0f;
+
         public AudioPlayer(string filePath)
         {
             _filePath = filePath;
@@ -20,12 +23,15 @@ namespace HyperliquidScanner.Utils
         {
             if (!File.Exists(_filePath)) return;
 
+            var volume = Math.Clamp(Volume, 0f, 1f);
+
             // Fire-and-forget on a thread pool thread so UI is never blocked
             Task.Run(() =>
             {
                 try
                 {
                     using var reader  = new AudioFileReader(_filePath);
+                    reader.Volume     = volume;
                     using var output  = new WaveOutEvent();
                     output.Init(reader);
                     output.Play();

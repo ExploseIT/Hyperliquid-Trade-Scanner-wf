@@ -131,5 +131,35 @@ namespace HyperliquidScanner.Models
         /// <summary>Fraction of auto-entry position to close on TP. 1.0 = close all.</summary>
         [JsonProperty("rsiLLTpSizeDecimal")]
         public decimal RsiLLTpSizeDecimal { get; set; } = 1.0m;
+
+        // ── Manual trade entry button ─────────────────────────────────────────
+
+        /// <summary>
+        /// Direction for the manual entry button. "long" or "short".
+        /// Leave empty to hide the entry button for this symbol.
+        /// </summary>
+        [JsonProperty("tradeDirection")]
+        public string TradeDirection { get; set; } = "";
+
+        /// <summary>
+        /// USD margin to commit per manual entry button press.
+        /// e.g. 50 = $50 margin. 0 = entry button disabled.
+        /// </summary>
+        [JsonProperty("tradeEntrySizeUsd")]
+        public decimal TradeEntrySizeUsd { get; set; } = 0m;
+
+        /// <summary>Leverage to apply for the manual entry button order.</summary>
+        [JsonProperty("tradeLeverage")]
+        public int TradeLeverage { get; set; } = 10;
+
+        /// <summary>True if the manual entry button is configured for this symbol.</summary>
+        public bool TradeEntryEnabled =>
+            TradeEntrySizeUsd > 0 &&
+            (TradeDirection.Equals("long",  StringComparison.OrdinalIgnoreCase) ||
+             TradeDirection.Equals("short", StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>True if the configured trade direction is long.</summary>
+        public bool TradeIsLong =>
+            TradeDirection.Equals("long", StringComparison.OrdinalIgnoreCase);
     }
 }
