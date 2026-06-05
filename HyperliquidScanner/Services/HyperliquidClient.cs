@@ -457,7 +457,19 @@ namespace HyperliquidScanner.Services
             string symbol, bool isBuy, decimal price, decimal size,
             int szDecimals, CancellationToken ct = default)
         {
-            return await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
+            // Retry up to 5 times on transient "does not exist" exchange-side auth failures
+            for (int attempt = 1; attempt <= 5; attempt++)
+            {
+                if (attempt > 1)
+                {
+                    await Task.Delay(1000 * attempt, ct);
+                    Log.Warning("[LimitEntry] {Symbol} retrying after auth failure (attempt {N}/5)", symbol, attempt);
+                }
+                var (ok, msg, oid) = await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct, reduceOnly: false);
+                if (ok || !msg.Contains("does not exist"))
+                    return (ok, msg, oid);
+            }
+            return (false, "Limit entry failed after 5 attempts — transient exchange auth error", 0);
         }
 
         /// <summary>
@@ -469,8 +481,21 @@ namespace HyperliquidScanner.Services
             int szDecimals, CancellationToken ct = default)
         {
             var aggressivePrice = isBuy ? markPrice * 1.05m : markPrice * 0.95m;
-            var (ok, msg, _)    = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size, szDecimals, "Ioc", ct);
-            return (ok, msg);
+
+            // Retry up to 5 times on transient "does not exist" exchange-side auth failures
+            // Critical for trailing stop / SL — must close even under adverse conditions
+            for (int attempt = 1; attempt <= 5; attempt++)
+            {
+                if (attempt > 1)
+                {
+                    await Task.Delay(1000 * attempt, ct); // 2s, 3s, 4s, 5s gaps
+                    Log.Warning("[Close] {Symbol} retrying after auth failure (attempt {N}/5)", symbol, attempt);
+                }
+                var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size, szDecimals, "Ioc", ct);
+                if (ok || !msg.Contains("does not exist"))
+                    return (ok, msg);
+            }
+            return (false, $"Close failed after 5 attempts — transient exchange auth error. Manual close required for {symbol}!");
         }
 
         /// <summary>
@@ -482,9 +507,21 @@ namespace HyperliquidScanner.Services
             int szDecimals, CancellationToken ct = default)
         {
             var aggressivePrice = isBuy ? markPrice * 1.05m : markPrice * 0.95m;
-            var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size,
-                                    szDecimals, "Ioc", ct, reduceOnly: false);
-            return (ok, msg);
+
+            // Retry up to 5 times on transient "does not exist" exchange-side auth failures
+            for (int attempt = 1; attempt <= 5; attempt++)
+            {
+                if (attempt > 1)
+                {
+                    await Task.Delay(1000 * attempt, ct); // 2s, 3s, 4s, 5s gaps between retries
+                    Log.Warning("[Entry] {Symbol} retrying after auth failure (attempt {N}/5)", symbol, attempt);
+                }
+                var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, aggressivePrice, size,
+                                       szDecimals, "Ioc", ct, reduceOnly: false);
+                if (ok || !msg.Contains("does not exist"))
+                    return (ok, msg);
+            }
+            return (false, "Entry failed after 5 attempts — transient exchange auth error");
         }
 
         private async Task<(bool ok, string message, long orderId)> PlaceOrderAsync(
@@ -502,10 +539,13 @@ namespace HyperliquidScanner.Services
             var (assetIndex, _) = assetInfo.Value;
             var nonce           = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-            // Format price and size to appropriate precision
-            var priceStr = FormatDecimal(price, 5);  // HL uses up to 5 sig figs for price
-            var sizeStr  = size.ToString($"F{szDecimals}",
-                              System.Globalization.CultureInfo.InvariantCulture);
+            // Format price and size — trailing zeros MUST be stripped before msgpack serialization.
+            // The exchange normalizes trailing zeros when verifying signatures; if our bytes
+            // include them (e.g. "0.03200" instead of "0.032"), the hash differs and
+            // signature recovery produces a random wrong address ("does not exist" error).
+            var priceStr = StripTrailingZeros(FormatDecimal(price, 5));
+            var sizeStr  = StripTrailingZeros(size.ToString($"F{szDecimals}",
+                               System.Globalization.CultureInfo.InvariantCulture));
 
             try
             {
@@ -586,6 +626,18 @@ namespace HyperliquidScanner.Services
         }
 
         /// <summary>
+        /// Removes trailing zeros from a decimal string — required before msgpack serialization.
+        /// The Hyperliquid exchange normalizes trailing zeros when verifying signatures;
+        /// mismatching bytes cause signature recovery to produce a wrong address.
+        /// e.g. "0.03200" → "0.032",  "62488.0" → "62488",  "0.50000" → "0.5"
+        /// </summary>
+        private static string StripTrailingZeros(string s)
+        {
+            if (!s.Contains('.')) return s;
+            return s.TrimEnd('0').TrimEnd('.');
+        }
+
+        /// <summary>
         /// Returns all open orders for the configured wallet address.
         /// Used to check if an entry order has filled or is still resting.
         /// </summary>
@@ -612,6 +664,33 @@ namespace HyperliquidScanner.Services
             }
             catch (Exception ex) { Log.Warning("GetOpenOrders failed: {Msg}", ex.Message); }
             return result;
+        }
+
+        /// <summary>
+        /// Checks if an open limit order already exists for a symbol in the given direction
+        /// at a price above current (for sells/shorts) or below current (for buys/longs).
+        /// Returns the order ID if found, or null if none exists.
+        /// Used to avoid placing duplicate SR pre-orders.
+        /// </summary>
+        public async Task<long?> FindExistingSRLimitAsync(
+            string symbol, bool isBuy, decimal currentPrice, CancellationToken ct = default)
+        {
+            var orders = await GetOpenOrdersAsync(ct);
+            var assetInfo = GetAssetIndex(symbol);
+            if (assetInfo == null) return null;
+
+            foreach (var (oid, assetIndex, orderIsBuy, price, _) in orders)
+            {
+                if (assetIndex != assetInfo.Value.index) continue;
+                if (orderIsBuy != isBuy) continue;
+
+                // For shorts (sell limit): order price should be above current price
+                // For longs  (buy  limit): order price should be below current price
+                bool isAboveCurrent = price > currentPrice;
+                if (isBuy && !isAboveCurrent) return oid;  // buy limit below current
+                if (!isBuy && isAboveCurrent) return oid;  // sell limit above current
+            }
+            return null;
         }
 
         /// <summary>
@@ -661,10 +740,10 @@ namespace HyperliquidScanner.Services
 
             var (assetIndex, _) = assetInfo.Value;
             var nonce     = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var priceStr  = FormatDecimal(price, 5);
-            var trigStr   = FormatDecimal(triggerPrice, 5);
-            var sizeStr   = size.ToString($"F{szDecimals}",
-                System.Globalization.CultureInfo.InvariantCulture);
+            var priceStr  = StripTrailingZeros(FormatDecimal(price, 5));
+            var trigStr   = StripTrailingZeros(FormatDecimal(triggerPrice, 5));
+            var sizeStr   = StripTrailingZeros(size.ToString($"F{szDecimals}",
+                System.Globalization.CultureInfo.InvariantCulture));
 
             var actionBytes = HyperliquidSigner.SerializeTriggerOrder(
                 assetIndex, isBuy, priceStr, trigStr, sizeStr, true, tpsl, isMarket);

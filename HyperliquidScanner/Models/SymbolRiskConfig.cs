@@ -161,5 +161,37 @@ namespace HyperliquidScanner.Models
         /// <summary>True if the configured trade direction is long.</summary>
         public bool TradeIsLong =>
             TradeDirection.Equals("long", StringComparison.OrdinalIgnoreCase);
+
+        // ── Support/Resistance pre-order ─────────────────────────────────────
+
+        /// <summary>
+        /// When true, clicking + also places a limit order at the nearest
+        /// swing high (for shorts) or swing low (for longs) above/below current price.
+        /// </summary>
+        [JsonProperty("preorder_atsupportresistance_enabled")]
+        public bool PreorderAtSREnabled { get; set; } = false;
+
+        /// <summary>Notional USD size of the SR pre-order limit.</summary>
+        [JsonProperty("preorder_atsupportresistance_sizeusd")]
+        public decimal PreorderAtSRSizeUsd { get; set; } = 100m;
+
+        /// <summary>Timeframe for swing high/low detection. e.g. "15m", "1h", "4h".</summary>
+        [JsonProperty("supportresistance_timeframe")]
+        public string SRTimeframe { get; set; } = "15m";
+
+        /// <summary>
+        /// Offset from the detected swing level as a fraction of price.
+        /// 0.001 = 0.1% above resistance (for shorts) or below support (for longs).
+        /// 0 = place exactly at the detected level.
+        /// </summary>
+        [JsonProperty("preorder_atsupportresistance_offsetpct")]
+        public decimal PreorderAtSROffsetPct { get; set; } = 0.001m;
+
+        /// <summary>
+        /// If true, the SR pre-order limit is automatically cancelled when the
+        /// position is closed (via trail, TP, SL, or manual close button).
+        /// </summary>
+        [JsonProperty("preorder_atsupportresistance_cancelonexit")]
+        public bool PreorderAtSRCancelOnExit { get; set; } = true;
     }
 }

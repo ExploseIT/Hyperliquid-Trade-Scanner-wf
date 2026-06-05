@@ -1,5 +1,6 @@
 using HyperliquidScanner.Models;
 using HyperliquidScanner.Services;
+using HyperliquidScanner.Utils;
 
 namespace HyperliquidScanner.Forms
 {
@@ -15,13 +16,18 @@ namespace HyperliquidScanner.Forms
 
         private DataGridView                _grid    = null!;
         private Label                       _header  = null!;
-        private System.Windows.Forms.Timer  _timer   = null!;
+
+        // Independent background loop — not tied to UI thread or asset scanner
+        private CancellationTokenSource    _loopCts = new();
 
         internal List<PositionInfo> _positions    = new();
         private HashSet<string>    _hip3Assets   = new(StringComparer.OrdinalIgnoreCase);
         private bool               _scanInProgress = false;
 
-        /// <summary>Set to true while a full asset scan is running to pause the mini-scan.</summary>
+        /// <summary>
+        /// Called when a full asset scan starts/stops.
+        /// Pauses the RSI mini-scan only — position fetch and monitor always run.
+        /// </summary>
         public void SetScanInProgress(bool scanning) => _scanInProgress = scanning;
 
         /// <summary>Fired after each position refresh — lets MainForm highlight matching grid rows.</summary>
@@ -70,9 +76,8 @@ namespace HyperliquidScanner.Forms
 
             BuildControls();
 
-            _timer = new System.Windows.Forms.Timer { Interval = 5_000 };
-            _timer.Tick += async (_, _) => await RefreshAsync();
-            _timer.Start();
+            // Start independent background loop — runs on thread pool, never blocked by UI or scanner
+            _ = RunMonitorLoopAsync(_loopCts.Token);
         }
 
         private void BuildControls()
@@ -161,33 +166,37 @@ namespace HyperliquidScanner.Forms
         // Latest mid prices for watchlist symbols (no open position)
         private Dictionary<string, decimal> _lastMids = new(StringComparer.OrdinalIgnoreCase);
 
+        // SR pre-order limit tracking: symbol → exchange order ID
+        // Cancelled automatically when position closes (if cancelonexit=true)
+        private readonly Dictionary<string, long> _srLimitOrders
+            = new(StringComparer.OrdinalIgnoreCase);
+
         public async Task RefreshAsync(CancellationToken ct = default)
         {
             try
             {
-                // ── Fetch fresh data (skipped during scans to avoid 429s) ──────
-                if (!_scanInProgress)
+                // ── Fetch fresh position data — always runs, independent of asset scanner ──
+                var positions = await _client.GetPositionsAsync(ct);
+
+                // Fetch mid prices for watchlist symbols
+                try { _lastMids = await _client.GetAllMidsAsync(ct); }
+                catch { /* non-fatal — watchlist rows will show – for price */ }
+
+                if (positions.Count == 0 && _positions.Count > 0)
                 {
-                    // Fetch fresh position data — skipped during scans to avoid 429s
-                    var positions = await _client.GetPositionsAsync(ct);
-
-                    // Fetch mid prices for watchlist symbols (configured but no open position)
-                    try { _lastMids = await _client.GetAllMidsAsync(ct); }
-                    catch { /* non-fatal — watchlist rows will show – for price */ }
-
-                    if (positions.Count == 0 && _positions.Count > 0)
-                    {
-                        _emptyResponseCount++;
-                        if (_emptyResponseCount >= EmptyResponseThreshold)
-                            _positions = positions; // genuinely empty — clear
-                        // else keep cached data, still fall through to grid update
-                    }
-                    else
-                    {
-                        _emptyResponseCount = 0;
-                        _positions = positions;
-                    }
+                    _emptyResponseCount++;
+                    if (_emptyResponseCount >= EmptyResponseThreshold)
+                        _positions = positions; // genuinely empty — clear
+                    // else keep cached data, still fall through to grid update
                 }
+                else
+                {
+                    _emptyResponseCount = 0;
+                    _positions = positions;
+                }
+
+                // Auto-cancel SR pre-orders for positions that have closed
+                await CancelSRLimitsForClosedPositionsAsync(_positions, ct);
 
                 // Always refresh grid from cached data — even during scans
                 if (IsHandleCreated && !IsDisposed)
@@ -478,13 +487,18 @@ namespace HyperliquidScanner.Forms
         {
             var colName = _grid.Columns[e.ColumnIndex].Name;
 
-            // Separator row (null tag) — paint blank for button columns
-            if (e.RowIndex >= 0 && _grid.Rows[e.RowIndex].Tag == null &&
-                colName is "Enter" or "Close")
+            // Separator row (null tag) or watchlist row (Size==0) — paint blank for Close column
+            if (e.RowIndex >= 0 && colName is "Enter" or "Close")
             {
-                e.PaintBackground(e.ClipBounds, true);
-                e.Handled = true;
-                return;
+                var rowTag = _grid.Rows[e.RowIndex].Tag;
+                bool isNonPosition = rowTag == null ||
+                                     (rowTag is PositionInfo wp && wp.Size == 0 && colName == "Close");
+                if (isNonPosition)
+                {
+                    e.PaintBackground(e.ClipBounds, true);
+                    e.Handled = true;
+                    return;
+                }
             }
 
             // ── Entry button column ───────────────────────────────────────────
@@ -599,7 +613,8 @@ namespace HyperliquidScanner.Forms
                     MessageBoxDefaultButton.Button2);
 
                 if (confirm != DialogResult.Yes) return;
-                _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals);
+                _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
+                                       assetInfo.Value.index);
                 return;
             }
 
@@ -618,7 +633,18 @@ namespace HyperliquidScanner.Forms
                 MessageBoxDefaultButton.Button2);
 
             if (closeConfirm != DialogResult.Yes) return;
-            _ = ClosePositionAsync(closePos);
+            _ = ClosePositionAsync(closePos, cancelSRLimit: true);
+        }
+
+        /// <summary>Shows a soft amber SR note in the header — does not imply entry failure.</summary>
+        private void ShowSRNote(string message)
+        {
+            Serilog.Log.Information("[SR Preorder] {Msg}", message);
+            _header.Text      = $"📌 {message}";
+            _header.ForeColor = Color.FromArgb(255, 200, 60);
+            var t = new System.Windows.Forms.Timer { Interval = 5_000 };
+            t.Tick += (_, _) => { t.Stop(); t.Dispose(); _header.ForeColor = Color.Silver; };
+            t.Start();
         }
 
         /// <summary>Shows an entry error in the header — visible even if the grid has refreshed.</summary>
@@ -634,11 +660,17 @@ namespace HyperliquidScanner.Forms
         }
 
         private async Task EnterPositionAsync(PositionInfo pos, SymbolRiskConfig riskCfg,
-                                               decimal size, int szDecimals)
+                                               decimal size, int szDecimals, int assetIndex)
         {
             try
             {
-                var isBuy     = riskCfg.TradeIsLong;
+                var isBuy = riskCfg.TradeIsLong;
+
+                // ── SR pre-order limit (if configured) ───────────────────────
+                if (riskCfg.PreorderAtSREnabled && riskCfg.PreorderAtSRSizeUsd > 0)
+                    await PlaceSRPreorderAsync(pos, riskCfg, isBuy, assetIndex, szDecimals);
+
+                // ── Market entry order ────────────────────────────────────────
                 var (ok, msg) = await _client.PlaceMarketEntryAsync(
                     pos.Symbol, isBuy, pos.MarkPrice, size, szDecimals);
 
@@ -647,7 +679,8 @@ namespace HyperliquidScanner.Forms
                 BeginInvoke(() =>
                 {
                     if (ok)
-                        ShowOrderResult(pos.Symbol, $"✓ {(isBuy ? "Long" : "Short")} entry {pos.Symbol}  size {size:G6}", true);
+                        ShowOrderResult(pos.Symbol,
+                            $"✓ {(isBuy ? "Long" : "Short")} entry {pos.Symbol}  size {size:G6}", true);
                     else
                         ShowEntryError(pos.Symbol, msg);
                 });
@@ -658,13 +691,113 @@ namespace HyperliquidScanner.Forms
             }
         }
 
-        private async Task ClosePositionAsync(PositionInfo pos)
+        private async Task PlaceSRPreorderAsync(PositionInfo pos, SymbolRiskConfig riskCfg,
+                                                 bool isBuy, int assetIndex, int szDecimals)
         {
             try
             {
-                // isBuy = true for shorts (buy to close), false for longs (sell to close)
-                var isBuy      = !pos.IsLong;
-                var assetInfo  = _client.GetAssetIndex(pos.Symbol);
+                // Check if an SR-style limit already exists on the exchange
+                var existingOid = await _client.FindExistingSRLimitAsync(
+                    pos.Symbol, isBuy, pos.MarkPrice);
+
+                if (existingOid.HasValue)
+                {
+                    // Track it so we can cancel on exit, and skip placing a new one
+                    _srLimitOrders[pos.Symbol] = existingOid.Value;
+                    Serilog.Log.Information(
+                        "[SR Preorder] {Symbol} existing limit found oid={Oid} — skipping new order",
+                        pos.Symbol, existingOid.Value);
+                    BeginInvoke(() => ShowOrderResult(pos.Symbol,
+                        $"📌 SR limit already exists (oid {existingOid.Value})", true));
+                    return;
+                }
+
+                var candles = await _client.GetCandlesAsync(pos.Symbol, riskCfg.SRTimeframe, 100);
+                if (candles == null || candles.Count == 0) return;
+
+                decimal? srLevel = isBuy
+                    ? SwingDetector.FindNearestSupport(candles, pos.MarkPrice)
+                    : SwingDetector.FindNearestResistance(candles, pos.MarkPrice);
+
+                Serilog.Log.Information(
+                    "[SR Preorder] {Symbol} mark={Mark:G6} isBuy={IsBuy} srLevel={SR} candles={N}",
+                    pos.Symbol, pos.MarkPrice, isBuy, srLevel?.ToString("G6") ?? "none", candles.Count);
+
+                if (srLevel == null)
+                {
+                    Serilog.Log.Information("[SR Preorder] No swing level found for {Symbol} on {TF}",
+                        pos.Symbol, riskCfg.SRTimeframe);
+                    BeginInvoke(() => ShowSRNote($"No SR level found on {riskCfg.SRTimeframe} — market only"));
+                    return;
+                }
+
+                // Apply offset: shorts go slightly above resistance, longs slightly below support
+                var limitPrice = isBuy
+                    ? srLevel.Value * (1 - riskCfg.PreorderAtSROffsetPct)
+                    : srLevel.Value * (1 + riskCfg.PreorderAtSROffsetPct);
+
+                var notional  = riskCfg.PreorderAtSRSizeUsd * riskCfg.TradeLeverage;
+                var limitSize = Math.Round(notional / limitPrice, szDecimals, MidpointRounding.ToZero);
+                if (limitSize <= 0) return;
+
+                var (ok, msg, oid) = await _client.PlaceLimitEntryAsync(
+                    pos.Symbol, isBuy, limitPrice, limitSize, szDecimals);
+
+                if (ok)
+                {
+                    _srLimitOrders[pos.Symbol] = oid;
+                    Serilog.Log.Information(
+                        "[SR Preorder] {Symbol} limit {Side} @ {Price:G6}  size={Size}  oid={Oid}",
+                        pos.Symbol, isBuy ? "BUY" : "SELL", limitPrice, limitSize, oid);
+                    BeginInvoke(() => ShowOrderResult(pos.Symbol,
+                        $"📌 SR limit @ {limitPrice:G6}", true));
+                }
+                else
+                {
+                    Serilog.Log.Warning("[SR Preorder] {Symbol} limit failed: {Msg}", pos.Symbol, msg);
+                    BeginInvoke(() => ShowSRNote($"SR limit failed for {pos.Symbol} — market order only"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning("[SR Preorder] {Symbol} error: {Msg}", pos.Symbol, ex.Message);
+            }
+        }
+
+        private async Task CancelSRLimitsForClosedPositionsAsync(
+            List<PositionInfo> openPositions, CancellationToken ct)
+        {
+            if (_srLimitOrders.Count == 0) return;
+            var openSymbols = openPositions.Select(p => p.Symbol)
+                                           .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var sym in _srLimitOrders.Keys.ToList())
+            {
+                if (openSymbols.Contains(sym)) continue;
+                var riskCfg = _config.GetRiskConfig(sym);
+                if (!riskCfg.PreorderAtSRCancelOnExit) continue;
+                await CancelSRLimitAsync(sym, ct);
+            }
+        }
+
+        private async Task CancelSRLimitAsync(string symbol, CancellationToken ct = default)
+        {
+            if (!_srLimitOrders.TryGetValue(symbol, out var oid)) return;
+            var assetInfo = _client.GetAssetIndex(symbol);
+            if (assetInfo != null)
+            {
+                var (ok, msg) = await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+                Serilog.Log.Information("[SR Preorder] Cancel {Symbol} oid={Oid}: {Result}",
+                    symbol, oid, ok ? "ok" : msg);
+            }
+            _srLimitOrders.Remove(symbol);
+        }
+
+        private async Task ClosePositionAsync(PositionInfo pos, bool cancelSRLimit = false)
+        {
+            try
+            {
+                var isBuy     = !pos.IsLong;
+                var assetInfo = _client.GetAssetIndex(pos.Symbol);
                 if (assetInfo == null)
                 {
                     BeginInvoke(() => ShowOrderResult(pos.Symbol,
@@ -672,11 +805,11 @@ namespace HyperliquidScanner.Forms
                     return;
                 }
 
+                if (cancelSRLimit) await CancelSRLimitAsync(pos.Symbol);
+
                 var (ok, msg) = await _client.PlaceMarketCloseAsync(
                     pos.Symbol, isBuy, pos.MarkPrice, pos.Size, assetInfo.Value.szDecimals);
 
-                // Immediately clear monitor state so any new position on this symbol
-                // starts completely fresh — avoids the stale TrailingFired display bug
                 if (ok) _monitor?.ClearSymbol(pos.Symbol);
 
                 BeginInvoke(() => ShowOrderResult(pos.Symbol,
@@ -689,9 +822,33 @@ namespace HyperliquidScanner.Forms
             }
         }
 
+        /// <summary>
+        /// Independent background loop running on the thread pool.
+        /// Polls positions and runs the monitor every 5 seconds regardless of
+        /// whether the asset scanner is running — never blocked by the UI thread.
+        /// </summary>
+        private async Task RunMonitorLoopAsync(CancellationToken ct)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(ct))
+                    await RefreshAsync(ct);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PositionsPanel] monitor loop crashed: {ex.Message}");
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing) _timer?.Dispose();
+            if (disposing)
+            {
+                _loopCts.Cancel();
+                _loopCts.Dispose();
+            }
             base.Dispose(disposing);
         }
     }

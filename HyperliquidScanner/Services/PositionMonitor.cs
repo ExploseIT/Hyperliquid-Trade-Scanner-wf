@@ -51,6 +51,9 @@ namespace HyperliquidScanner.Services
             public int TpRetryCount       { get; set; }
             public int TrailRetryCount    { get; set; }
             public const int MaxRetries   = 3;
+
+            // Concurrency guard — prevents multiple monitor cycles from placing orders simultaneously
+            public bool OrderInFlight     { get; set; }
         }
 
         private readonly Dictionary<string, SymbolState>     _states
@@ -417,102 +420,71 @@ namespace HyperliquidScanner.Services
         private async Task TriggerSlAsync(
             PositionInfo pos, SymbolRiskConfig cfg, string label, CancellationToken ct)
         {
+            var state = _states.GetValueOrDefault(pos.Symbol);
+            if (state == null) return;
+            if (state.OrderInFlight) { Log.Debug("TriggerSL: skipping {Symbol} — order in flight", pos.Symbol); return; }
+
             var assetInfo = _client.GetAssetIndex(pos.Symbol);
-            if (assetInfo == null)
-            {
-                OrderFailed?.Invoke(pos.Symbol, $"SL: asset index unknown for {pos.Symbol}");
-                return;
-            }
+            if (assetInfo == null) { OrderFailed?.Invoke(pos.Symbol, $"SL: asset index unknown for {pos.Symbol}"); return; }
 
             var (_, szDec) = assetInfo.Value;
             var isBuy      = !pos.IsLong;
 
-            // Try limit first (0.5% aggressive for quick fill)
-            var limitPrice = pos.IsLong
-                ? pos.MarkPrice * 0.995m
-                : pos.MarkPrice * 1.005m;
-
-            var (ok, msg) = await _client.PlaceLimitCloseAsync(
-                pos.Symbol, isBuy, limitPrice, pos.Size, szDec, ct);
-
-            if (ok)
+            state.OrderInFlight = true;
+            try
             {
-                Log.Information("SL limit placed: {Label}", label);
-                OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — limit close placed");
-                return;
-            }
+                // Market close with built-in 5× retry
+                var (ok, msg) = await _client.PlaceMarketCloseAsync(
+                    pos.Symbol, isBuy, pos.MarkPrice, pos.Size, szDec, ct);
 
-            // Fallback: market (IOC)
-            Log.Warning("SL limit failed ({Msg}), trying market for {Symbol}", msg, pos.Symbol);
-            (ok, msg) = await _client.PlaceMarketCloseAsync(
-                pos.Symbol, isBuy, pos.MarkPrice, pos.Size, szDec, ct);
-
-            if (ok)
-            {
-                Log.Information("SL market placed: {Label}", label);
-                OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — market close placed");
-            }
-            else
-            {
-                var s = _states.GetValueOrDefault(pos.Symbol);
-                if (s != null && ++s.SlRetryCount < SymbolState.MaxRetries)
+                if (ok)
                 {
-                    s.SlFired = false; // retry
-                    Log.Warning("SL FAILED (attempt {N}): {Msg}", s.SlRetryCount, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"SL failed attempt {s.SlRetryCount}: {msg}");
+                    Log.Information("SL placed: {Label}", label);
+                    OrderPlaced?.Invoke(pos.Symbol, $"🔴 SL {label} — closed");
                 }
                 else
                 {
-                    Log.Error("SL FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"SL FAILED permanently for {label} — manual close required");
+                    Log.Error("SL FAILED after all retries for {Label}: {Msg}", label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"⚠ SL FAILED — manual close required for {pos.Symbol}");
                 }
             }
+            finally { state.OrderInFlight = false; }
         }
 
         private async Task TriggerTpAsync(
             PositionInfo pos, SymbolRiskConfig cfg, string label, CancellationToken ct)
         {
+            var state = _states.GetValueOrDefault(pos.Symbol);
+            if (state == null) return;
+            if (state.OrderInFlight) { Log.Debug("TriggerTP: skipping {Symbol} — order in flight", pos.Symbol); return; }
+
             var assetInfo = _client.GetAssetIndex(pos.Symbol);
-            if (assetInfo == null)
-            {
-                OrderFailed?.Invoke(pos.Symbol, $"TP: asset index unknown for {pos.Symbol}");
-                return;
-            }
+            if (assetInfo == null) { OrderFailed?.Invoke(pos.Symbol, $"TP: asset index unknown for {pos.Symbol}"); return; }
 
             var (_, szDec) = assetInfo.Value;
             var isBuy      = !pos.IsLong;
 
-            var closeSize = Math.Round(pos.Size * cfg.TpSizeDecimal,
-                szDec, MidpointRounding.ToZero);
-            if (closeSize <= 0)
-            {
-                OrderFailed?.Invoke(pos.Symbol, $"TP: close size is 0 for {pos.Symbol}");
-                return;
-            }
+            var closeSize = Math.Round(pos.Size * cfg.TpSizeDecimal, szDec, MidpointRounding.ToZero);
+            if (closeSize <= 0) { OrderFailed?.Invoke(pos.Symbol, $"TP: close size is 0 for {pos.Symbol}"); return; }
 
-            var (ok, msg) = await _client.PlaceLimitCloseAsync(
-                pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
+            state.OrderInFlight = true;
+            try
+            {
+                var (ok, msg) = await _client.PlaceMarketCloseAsync(
+                    pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
 
-            if (ok)
-            {
-                Log.Information("TP placed: {Label}", label);
-                OrderPlaced?.Invoke(pos.Symbol, $"🟢 TP {label} — closed {cfg.TpSizeDecimal:P0}");
-            }
-            else
-            {
-                var s = _states.GetValueOrDefault(pos.Symbol);
-                if (s != null && ++s.TpRetryCount < SymbolState.MaxRetries)
+                if (ok)
                 {
-                    s.TpFired = false; // retry
-                    Log.Warning("TP FAILED (attempt {N}): {Msg}", s.TpRetryCount, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"TP failed attempt {s.TpRetryCount}: {msg}");
+                    Log.Information("TP placed: {Label}", label);
+                    OrderPlaced?.Invoke(pos.Symbol, $"🟢 TP {label} — closed {cfg.TpSizeDecimal:P0}");
                 }
                 else
                 {
-                    Log.Error("TP FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"TP FAILED permanently for {label} — manual close required");
+                    Log.Error("TP FAILED after all retries for {Label}: {Msg}", label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"⚠ TP FAILED — manual close required for {pos.Symbol}");
                 }
             }
+            finally { state.OrderInFlight = false; }
         }
 
         private async Task UpdateExchangeTrailingSlAsync(
@@ -581,6 +553,16 @@ namespace HyperliquidScanner.Services
         private async Task TriggerTrailingAsync(
             PositionInfo pos, SymbolRiskConfig cfg, string label, CancellationToken ct)
         {
+            var state = _states.GetValueOrDefault(pos.Symbol);
+            if (state == null) return;
+
+            // Prevent concurrent fires — if an order is already in flight for this symbol, skip
+            if (state.OrderInFlight)
+            {
+                Log.Debug("TriggerTrailing: skipping {Symbol} — order already in flight", pos.Symbol);
+                return;
+            }
+
             var assetInfo = _client.GetAssetIndex(pos.Symbol);
             if (assetInfo == null)
             {
@@ -599,29 +581,30 @@ namespace HyperliquidScanner.Services
                 return;
             }
 
-            // Use IOC at aggressive price for trailing — speed matters here
-            var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
+            // Mark in-flight — prevents concurrent monitor cycles from firing simultaneously
+            state.OrderInFlight = true;
+            try
+            {
+                // PlaceMarketCloseAsync already retries 5× internally for auth errors
+                var (ok, msg) = await _client.PlaceMarketCloseAsync(
+                    pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
 
-            if (ok)
-            {
-                Log.Information("Trailing placed: {Label}", label);
-                OrderPlaced?.Invoke(pos.Symbol, $"🔒 Trailing {label} — closed {cfg.TrailingSizeDecimal:P0}");
-            }
-            else
-            {
-                var s = _states.GetValueOrDefault(pos.Symbol);
-                if (s != null && ++s.TrailRetryCount < SymbolState.MaxRetries)
+                if (ok)
                 {
-                    s.TrailingFired = false; // retry
-                    Log.Warning("Trailing FAILED (attempt {N}): {Msg}", s.TrailRetryCount, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"Trailing failed attempt {s.TrailRetryCount}: {msg}");
+                    Log.Information("Trailing placed: {Label}", label);
+                    OrderPlaced?.Invoke(pos.Symbol, $"🔒 Trailing {label} — closed {cfg.TrailingSizeDecimal:P0}");
                 }
                 else
                 {
-                    Log.Error("Trailing FAILED after {Max} attempts for {Label}: {Msg}", SymbolState.MaxRetries, label, msg);
-                    OrderFailed?.Invoke(pos.Symbol, $"Trailing FAILED permanently for {label} — manual close required");
+                    // All internal retries exhausted — log and leave TrailingFired=true
+                    // so we don't keep hammering. User must close manually.
+                    Log.Error("Trailing FAILED after all retries for {Label}: {Msg}", label, msg);
+                    OrderFailed?.Invoke(pos.Symbol, $"⚠ Trailing FAILED — manual close required for {pos.Symbol}");
                 }
+            }
+            finally
+            {
+                state.OrderInFlight = false;
             }
         }
     }
