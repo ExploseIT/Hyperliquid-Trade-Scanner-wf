@@ -462,13 +462,10 @@ namespace HyperliquidScanner.Services
         /// For a short close: isBuy=true, price slightly above mark.
         /// Returns the response JToken or null on failure.
         /// </summary>
-        public async Task<(bool ok, string message)> PlaceLimitCloseAsync(
+        public async Task<(bool ok, string message, long orderId)> PlaceLimitCloseAsync(
             string symbol, bool isBuy, decimal price, decimal size,
             int szDecimals, CancellationToken ct = default)
-        {
-            var (ok, msg, _) = await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
-            return (ok, msg);
-        }
+            => await PlaceOrderAsync(symbol, isBuy, price, size, szDecimals, "Gtc", ct);
 
         /// <summary>Places a limit entry order and returns the exchange order ID on success.</summary>
         public async Task<(bool ok, string message, long orderId)> PlaceLimitEntryAsync(

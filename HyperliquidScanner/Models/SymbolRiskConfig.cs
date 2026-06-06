@@ -162,6 +162,90 @@ namespace HyperliquidScanner.Models
         public bool TradeIsLong =>
             TradeDirection.Equals("long", StringComparison.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Order type for the entry (+) button. "Market" (default) or "Limit".
+        /// "Limit" opens a price dialog pre-filled with mark price + tradeOrderOffsetUsd.
+        /// </summary>
+        [JsonProperty("tradeOrderType")]
+        public string TradeOrderType { get; set; } = "Market";
+
+        /// <summary>
+        /// Signed USD amount added to mark price to pre-fill the limit entry dialog.
+        /// Positive = above mark (useful for short entries above current price).
+        /// Negative = below mark (useful for long entries below current price).
+        /// </summary>
+        [JsonProperty("tradeOrderOffsetUsd")]
+        public decimal TradeOrderOffsetUsd { get; set; } = 0m;
+
+        /// <summary>
+        /// Order type for the close (✕) button. "Market" (default) or "Limit".
+        /// "Limit" opens a price dialog pre-filled with mark price + tradeCloseOffsetUsd.
+        /// </summary>
+        [JsonProperty("tradeCloseType")]
+        public string TradeCloseType { get; set; } = "Market";
+
+        /// <summary>
+        /// Signed USD amount added to mark price to pre-fill the limit close dialog.
+        /// Positive = above mark, negative = below mark.
+        /// </summary>
+        [JsonProperty("tradeCloseOffsetUsd")]
+        public decimal TradeCloseOffsetUsd { get; set; } = 0m;
+
+        public bool TradeOrderIsLimit =>
+            TradeOrderType.Equals("Limit", StringComparison.OrdinalIgnoreCase);
+
+        public bool TradeCloseIsLimit =>
+            TradeCloseType.Equals("Limit", StringComparison.OrdinalIgnoreCase);
+
+        // ── Per-trigger close types ───────────────────────────────────────────
+
+        /// <summary>
+        /// Order type when the trailing stop fires. "Market" (default) or "Limit".
+        /// "Limit" places a GTC reduce-only limit at freshPrice + trailingCloseOffsetUsd.
+        /// </summary>
+        [JsonProperty("trailingCloseType")]
+        public string TrailingCloseType { get; set; } = "Market";
+
+        /// <summary>
+        /// Signed USD offset from fresh mark price for the trailing limit close.
+        /// e.g. -50 = place limit $50 below mark (short close — buy at a lower price).
+        /// </summary>
+        [JsonProperty("trailingCloseOffsetUsd")]
+        public decimal TrailingCloseOffsetUsd { get; set; } = 0m;
+
+        /// <summary>
+        /// Order type when TP fires. "Market" (default) or "Limit".
+        /// </summary>
+        [JsonProperty("tpCloseType")]
+        public string TpCloseType { get; set; } = "Market";
+
+        /// <summary>
+        /// Signed USD offset from fresh mark price for the TP limit close.
+        /// </summary>
+        [JsonProperty("tpCloseOffsetUsd")]
+        public decimal TpCloseOffsetUsd { get; set; } = 0m;
+
+        /// <summary>
+        /// Order type when SL fires. "Market" (default) or "Limit".
+        /// </summary>
+        [JsonProperty("slCloseType")]
+        public string SlCloseType { get; set; } = "Market";
+
+        /// <summary>
+        /// Signed USD offset from fresh mark price for the SL limit close.
+        /// </summary>
+        [JsonProperty("slCloseOffsetUsd")]
+        public decimal SlCloseOffsetUsd { get; set; } = 0m;
+
+        public bool TrailingCloseIsLimit =>
+            TrailingCloseType.Equals("Limit", StringComparison.OrdinalIgnoreCase);
+
+        public bool TpCloseIsLimit =>
+            TpCloseType.Equals("Limit", StringComparison.OrdinalIgnoreCase);
+
+        public bool SlCloseIsLimit =>
+            SlCloseType.Equals("Limit", StringComparison.OrdinalIgnoreCase);
+
         // ── Support/Resistance pre-order ─────────────────────────────────────
 
         /// <summary>

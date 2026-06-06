@@ -24,6 +24,18 @@ namespace HyperliquidScanner.Forms
         private HashSet<string>    _hip3Assets   = new(StringComparer.OrdinalIgnoreCase);
         private bool               _scanInProgress = false;
 
+        // ── Limit entry bracket tracking ─────────────────────────────────────
+        /// <summary>Pending limit entry orders — when filled, bracket (TP/SL) is placed.</summary>
+        private record PendingBracket(long Oid, decimal? TpPrice, decimal? SlPrice,
+                                      int SzDecimals, bool IsLong);
+        private readonly Dictionary<string, PendingBracket> _pendingLimitEntries
+            = new(StringComparer.OrdinalIgnoreCase);
+
+        // ── Limit close tracking ─────────────────────────────────────────────
+        /// <summary>Active limit close orders — auto-updated when position size changes.</summary>
+        private readonly Dictionary<string, (long Oid, decimal LimitPrice, decimal TrackedSize)>
+            _limitCloseOrders = new(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>
         /// Called when a full asset scan starts/stops.
         /// Pauses the RSI mini-scan only — position fetch and monitor always run.
@@ -198,6 +210,15 @@ namespace HyperliquidScanner.Forms
 
                 // Auto-cancel SR pre-orders for positions that have closed
                 await CancelSRLimitsForClosedPositionsAsync(_positions, ct);
+
+                // Check if pending limit entry orders have filled → place bracket
+                // Sync limit close orders to current position size
+                if (_pendingLimitEntries.Count > 0 || _limitCloseOrders.Count > 0)
+                {
+                    var openOrders = await _client.GetOpenOrdersAsync(ct);
+                    await CheckPendingLimitEntriesAsync(_positions, openOrders, ct);
+                    await SyncLimitCloseOrdersAsync(_positions, openOrders, ct);
+                }
 
                 // Always refresh grid from cached data — even during scans
                 if (IsHandleCreated && !IsDisposed)
@@ -594,49 +615,79 @@ namespace HyperliquidScanner.Forms
                 var riskCfg = _config.GetRiskConfig(pos.Symbol);
                 if (!riskCfg.TradeEntryEnabled) return;
 
-                var direction  = riskCfg.TradeIsLong ? "Long" : "Short";
-                var notional   = riskCfg.TradeEntrySizeUsd * riskCfg.TradeLeverage;
+                var direction = riskCfg.TradeIsLong ? "Long" : "Short";
+                var notional  = riskCfg.TradeEntrySizeUsd * riskCfg.TradeLeverage;
                 if (pos.MarkPrice <= 0) { ShowEntryError(pos.Symbol, "No price available — retry in a moment"); return; }
-                var assetInfo  = _client.GetAssetIndex(pos.Symbol);
+                var assetInfo = _client.GetAssetIndex(pos.Symbol);
                 if (assetInfo == null) { ShowEntryError(pos.Symbol, $"Asset index not found for {pos.Symbol} — ensure the scanner has run at least once"); return; }
-                var size       = Math.Round(notional / pos.MarkPrice,
-                                     assetInfo.Value.szDecimals, MidpointRounding.ToZero);
+                var size      = Math.Round(notional / pos.MarkPrice,
+                                    assetInfo.Value.szDecimals, MidpointRounding.ToZero);
 
-                var notionalUsd = size * pos.MarkPrice;
-                var confirm = MessageBox.Show(
-                    $"Add {direction} {pos.Symbol}?\n\n" +
-                    $"  Size:      {size:G6}\n" +
-                    $"  Notional:  ~${notionalUsd:F2}\n" +
-                    $"  Mark:      {pos.MarkPrice:G6}\n\n" +
-                    "Size is calculated from tradeEntrySizeUsd × tradeLeverage.\n" +
-                    "Actual position leverage is unchanged.",
-                    $"Confirm {direction} Entry — {pos.Symbol}",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button2);
-
-                if (confirm != DialogResult.Yes) return;
-                _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
-                                       assetInfo.Value.index);
+                if (riskCfg.TradeOrderIsLimit)
+                {
+                    // ── Limit entry — show price dialog ──────────────────────
+                    var sizeDesc = $"Size: {size:G6}  (~${size * pos.MarkPrice:F2} notional)";
+                    using var dlg = new LimitPriceDialog(
+                        $"Limit {direction} Entry — {pos.Symbol}",
+                        pos.MarkPrice, riskCfg.TradeOrderOffsetUsd, sizeDesc, showBracket: true);
+                    if (dlg.ShowDialog(this) != DialogResult.OK || dlg.LimitPrice == null) return;
+                    _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
+                                           assetInfo.Value.index, limitPrice: dlg.LimitPrice,
+                                           tpPrice: dlg.TpPrice, slPrice: dlg.SlPrice);
+                }
+                else
+                {
+                    // ── Market entry — confirm dialog ─────────────────────────
+                    var notionalUsd = size * pos.MarkPrice;
+                    var confirm = MessageBox.Show(
+                        $"Add {direction} {pos.Symbol}?\n\n" +
+                        $"  Size:      {size:G6}\n" +
+                        $"  Notional:  ~${notionalUsd:F2}\n" +
+                        $"  Mark:      {pos.MarkPrice:G6}\n\n" +
+                        "Size is calculated from tradeEntrySizeUsd × tradeLeverage.\n" +
+                        "Actual position leverage is unchanged.",
+                        $"Confirm Market {direction} Entry — {pos.Symbol}",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button2);
+                    if (confirm != DialogResult.Yes) return;
+                    _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
+                                           assetInfo.Value.index);
+                }
                 return;
             }
 
             if (colName != "Close") return;
             if (_grid.Rows[e.RowIndex].Tag is not PositionInfo closePos) return;
 
-            var pnlSign      = closePos.UnrealisedPnl >= 0 ? "+" : "";
-            var closeConfirm = MessageBox.Show(
-                $"Market-close {closePos.SideLabel} {closePos.Symbol}?\n\n" +
-                $"  Size:  {closePos.Size:G6}\n" +
-                $"  PnL:   {pnlSign}{closePos.UnrealisedPnl:F2} USD\n\n" +
-                "This will place a market IOC order at ±5% of mark price.",
-                "Confirm Close",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-
-            if (closeConfirm != DialogResult.Yes) return;
-            _ = ClosePositionAsync(closePos, cancelSRLimit: true);
+            var closeRiskCfg = _config.GetRiskConfig(closePos.Symbol);
+            if (closeRiskCfg.TradeCloseIsLimit)
+            {
+                // ── Limit close — show price dialog ──────────────────────────
+                var pnlSign  = closePos.UnrealisedPnl >= 0 ? "+" : "";
+                var sizeDesc = $"Size: {closePos.Size:G6}   PnL: {pnlSign}{closePos.UnrealisedPnl:F2} USD";
+                using var dlg = new LimitPriceDialog(
+                    $"Limit Close — {closePos.SideLabel} {closePos.Symbol}",
+                    closePos.MarkPrice, closeRiskCfg.TradeCloseOffsetUsd, sizeDesc);
+                if (dlg.ShowDialog(this) != DialogResult.OK || dlg.LimitPrice == null) return;
+                _ = ClosePositionAsync(closePos, cancelSRLimit: true, limitPrice: dlg.LimitPrice);
+            }
+            else
+            {
+                // ── Market close — confirm dialog ─────────────────────────────
+                var pnlSign      = closePos.UnrealisedPnl >= 0 ? "+" : "";
+                var closeConfirm = MessageBox.Show(
+                    $"Market-close {closePos.SideLabel} {closePos.Symbol}?\n\n" +
+                    $"  Size:  {closePos.Size:G6}\n" +
+                    $"  PnL:   {pnlSign}{closePos.UnrealisedPnl:F2} USD\n\n" +
+                    "This will place a market IOC order at ±5% of mark price.",
+                    "Confirm Market Close",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2);
+                if (closeConfirm != DialogResult.Yes) return;
+                _ = ClosePositionAsync(closePos, cancelSRLimit: true);
+            }
         }
 
         /// <summary>Shows a soft amber SR note in the header — does not imply entry failure.</summary>
@@ -663,27 +714,54 @@ namespace HyperliquidScanner.Forms
         }
 
         private async Task EnterPositionAsync(PositionInfo pos, SymbolRiskConfig riskCfg,
-                                               decimal size, int szDecimals, int assetIndex)
+                                               decimal size, int szDecimals, int assetIndex,
+                                               decimal? limitPrice = null,
+                                               decimal? tpPrice    = null,
+                                               decimal? slPrice    = null)
         {
             try
             {
-                var isBuy = riskCfg.TradeIsLong;
+                var isBuy     = riskCfg.TradeIsLong;
+                var isLimit   = limitPrice.HasValue;
+                var orderDesc = isLimit ? $"Limit @ {limitPrice:G8}" : "Market";
 
                 // ── SR pre-order limit (if configured) ───────────────────────
                 if (riskCfg.PreorderAtSREnabled && riskCfg.PreorderAtSRSizeUsd > 0)
                     await PlaceSRPreorderAsync(pos, riskCfg, isBuy, assetIndex, szDecimals);
 
-                // ── Market entry order ────────────────────────────────────────
-                var (ok, msg) = await _client.PlaceMarketEntryAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice, size, szDecimals);
+                // ── Entry order ───────────────────────────────────────────────
+                bool ok; string msg; long oid = 0;
+                if (isLimit)
+                {
+                    (ok, msg, oid) = await _client.PlaceLimitEntryAsync(
+                        pos.Symbol, isBuy, limitPrice!.Value, size, szDecimals);
+                }
+                else
+                {
+                    (ok, msg) = await _client.PlaceMarketEntryAsync(
+                        pos.Symbol, isBuy, pos.MarkPrice, size, szDecimals);
+                }
 
-                if (ok) _monitor?.ClearSymbol(pos.Symbol);
+                if (ok)
+                {
+                    _monitor?.ClearSymbol(pos.Symbol);
+
+                    // Track pending limit entry for bracket placement on fill
+                    if (isLimit && oid > 0 && (tpPrice.HasValue || slPrice.HasValue))
+                    {
+                        _pendingLimitEntries[pos.Symbol] =
+                            new PendingBracket(oid, tpPrice, slPrice, szDecimals, isBuy);
+                        Serilog.Log.Information(
+                            "[Bracket] {Symbol} pending — oid={Oid} TP={Tp} SL={Sl}",
+                            pos.Symbol, oid, tpPrice, slPrice);
+                    }
+                }
 
                 BeginInvoke(() =>
                 {
                     if (ok)
                         ShowOrderResult(pos.Symbol,
-                            $"✓ {(isBuy ? "Long" : "Short")} entry {pos.Symbol}  size {size:G6}", true);
+                            $"✓ {(isBuy ? "Long" : "Short")} {orderDesc} entry {pos.Symbol}  size {size:G6}", true);
                     else
                         ShowEntryError(pos.Symbol, msg);
                 });
@@ -806,11 +884,13 @@ namespace HyperliquidScanner.Forms
             _srLimitOrders.Remove(symbol);
         }
 
-        private async Task ClosePositionAsync(PositionInfo pos, bool cancelSRLimit = false)
+        private async Task ClosePositionAsync(PositionInfo pos, bool cancelSRLimit = false,
+                                               decimal? limitPrice = null)
         {
             try
             {
                 var isBuy     = !pos.IsLong;
+                var isLimit   = limitPrice.HasValue;
                 var assetInfo = _client.GetAssetIndex(pos.Symbol);
                 if (assetInfo == null)
                 {
@@ -821,18 +901,196 @@ namespace HyperliquidScanner.Forms
 
                 if (cancelSRLimit) await CancelSRLimitAsync(pos.Symbol);
 
-                var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice, pos.Size, assetInfo.Value.szDecimals);
+                // Cancel any tracked limit close order for this symbol
+                if (_limitCloseOrders.TryGetValue(pos.Symbol, out var lco) && assetInfo != null)
+                {
+                    await _client.CancelOrderAsync(assetInfo.Value.index, lco.Oid, ct: default);
+                    _limitCloseOrders.Remove(pos.Symbol);
+                }
 
-                if (ok) _monitor?.ClearSymbol(pos.Symbol);
+                bool ok; string msg; long closeOid = 0;
+                if (isLimit)
+                {
+                    (ok, msg, closeOid) = await _client.PlaceLimitCloseAsync(
+                        pos.Symbol, isBuy, limitPrice!.Value, pos.Size, assetInfo.Value.szDecimals);
+                }
+                else
+                {
+                    (ok, msg) = await _client.PlaceMarketCloseAsync(
+                        pos.Symbol, isBuy, pos.MarkPrice, pos.Size, assetInfo.Value.szDecimals);
+                }
 
+                if (ok)
+                {
+                    _monitor?.ClearSymbol(pos.Symbol);
+
+                    // Track limit close order for size-sync on DCA
+                    if (isLimit && closeOid > 0)
+                    {
+                        _limitCloseOrders[pos.Symbol] = (closeOid, limitPrice!.Value, pos.Size);
+                        Serilog.Log.Information(
+                            "[LimitClose] {Symbol} tracking oid={Oid} price={Price} size={Size}",
+                            pos.Symbol, closeOid, limitPrice.Value, pos.Size);
+                    }
+                }
+
+                var orderDesc = isLimit ? $"Limit close @ {limitPrice:G8}" : "Closed";
                 BeginInvoke(() => ShowOrderResult(pos.Symbol,
-                    ok ? $"✓ Closed {pos.Symbol}" : $"✗ Close failed: {msg}", ok));
+                    ok ? $"✓ {orderDesc} {pos.Symbol}" : $"✗ Close failed: {msg}", ok));
             }
             catch (Exception ex)
             {
                 BeginInvoke(() => ShowOrderResult(pos.Symbol,
                     $"✗ Close error: {ex.Message}", false));
+            }
+        }
+
+        // ── Bracket fill detection ────────────────────────────────────────────
+
+        /// <summary>
+        /// Checks whether any pending limit entry orders have been filled.
+        /// If filled and TP/SL prices were set, places bracket trigger orders.
+        /// </summary>
+        private async Task CheckPendingLimitEntriesAsync(
+            List<PositionInfo> positions,
+            List<(long oid, int assetIndex, bool isBuy, decimal price, decimal size)> openOrders,
+            CancellationToken ct)
+        {
+            var openOids = new HashSet<long>(openOrders.Select(o => o.oid));
+
+            foreach (var (symbol, pending) in _pendingLimitEntries.ToList())
+            {
+                if (openOids.Contains(pending.Oid)) continue; // still resting
+
+                // Order gone — did a position appear? (filled) or not (cancelled)
+                _pendingLimitEntries.Remove(symbol);
+                var pos = positions.FirstOrDefault(p =>
+                    p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
+
+                if (pos == null)
+                {
+                    Serilog.Log.Information(
+                        "[Bracket] {Symbol} limit entry oid={Oid} gone — cancelled/rejected, no bracket",
+                        symbol, pending.Oid);
+                    continue;
+                }
+
+                Serilog.Log.Information(
+                    "[Bracket] {Symbol} limit entry oid={Oid} filled — placing bracket TP={Tp} SL={Sl}",
+                    symbol, pending.Oid, pending.TpPrice, pending.SlPrice);
+
+                await PlaceManualBracketAsync(symbol, pos, pending, ct);
+            }
+        }
+
+        /// <summary>
+        /// Places TP and/or SL trigger orders for a freshly filled limit entry.
+        /// TP = limit trigger (non-market).  SL = market trigger.
+        /// </summary>
+        private async Task PlaceManualBracketAsync(
+            string symbol, PositionInfo pos, PendingBracket pending, CancellationToken ct)
+        {
+            var assetInfo = _client.GetAssetIndex(symbol);
+            if (assetInfo == null)
+            {
+                Serilog.Log.Warning("[Bracket] {Symbol} — asset index not found, bracket skipped", symbol);
+                return;
+            }
+
+            // To CLOSE a long: sell (isBuy=false).  To CLOSE a short: buy (isBuy=true).
+            var closingBuy = !pending.IsLong;
+            bool tpOk = true, slOk = true;
+
+            if (pending.TpPrice.HasValue)
+            {
+                (tpOk, _, _) = await _client.PlaceTriggerOrderAsync(
+                    symbol, closingBuy,
+                    pending.TpPrice.Value, pending.TpPrice.Value,
+                    pos.Size, pending.SzDecimals, "tp", isMarket: false, ct);
+            }
+
+            if (pending.SlPrice.HasValue)
+            {
+                (slOk, _, _) = await _client.PlaceTriggerOrderAsync(
+                    symbol, closingBuy,
+                    pending.SlPrice.Value, pending.SlPrice.Value,
+                    pos.Size, pending.SzDecimals, "sl", isMarket: true, ct);
+            }
+
+            var result = $"🎯 Bracket {symbol}  " +
+                         (pending.TpPrice.HasValue ? $"TP {pending.TpPrice:G8} {(tpOk ? "✓" : "✗")}  " : "") +
+                         (pending.SlPrice.HasValue ? $"SL {pending.SlPrice:G8} {(slOk ? "✓" : "✗")}" : "");
+
+            Serilog.Log.Information("[Bracket] {Msg}", result);
+            BeginInvoke(() => ShowOrderResult(symbol, result, tpOk && slOk));
+        }
+
+        // ── Limit close size sync ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Keeps tracked limit close orders in sync with the current position size.
+        /// If position size changes (DCA), the old limit close is cancelled and replaced.
+        /// If the limit close order fills or position disappears, tracking is removed.
+        /// </summary>
+        private async Task SyncLimitCloseOrdersAsync(
+            List<PositionInfo> positions,
+            List<(long oid, int assetIndex, bool isBuy, decimal price, decimal size)> openOrders,
+            CancellationToken ct)
+        {
+            var openOids = new HashSet<long>(openOrders.Select(o => o.oid));
+
+            foreach (var (symbol, (oid, limitPrice, trackedSize)) in _limitCloseOrders.ToList())
+            {
+                var assetInfo = _client.GetAssetIndex(symbol);
+
+                // Order no longer on the book — filled or cancelled externally
+                if (!openOids.Contains(oid))
+                {
+                    _limitCloseOrders.Remove(symbol);
+                    Serilog.Log.Information(
+                        "[LimitClose] {Symbol} oid={Oid} gone from open orders — tracking removed", symbol, oid);
+                    continue;
+                }
+
+                var pos = positions.FirstOrDefault(p =>
+                    p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
+
+                // Position closed — cancel the resting limit close
+                if (pos == null)
+                {
+                    if (assetInfo != null)
+                        await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+                    _limitCloseOrders.Remove(symbol);
+                    Serilog.Log.Information(
+                        "[LimitClose] {Symbol} position gone — limit close oid={Oid} cancelled", symbol, oid);
+                    continue;
+                }
+
+                // Position size changed (DCA) — cancel and replace with new size
+                if (pos.Size != trackedSize && assetInfo != null)
+                {
+                    await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+
+                    var isBuy = !pos.IsLong;
+                    var (ok, _, newOid) = await _client.PlaceLimitCloseAsync(
+                        symbol, isBuy, limitPrice, pos.Size, assetInfo.Value.szDecimals, ct);
+
+                    if (ok && newOid > 0)
+                    {
+                        _limitCloseOrders[symbol] = (newOid, limitPrice, pos.Size);
+                        Serilog.Log.Information(
+                            "[LimitClose] {Symbol} size {Old}→{New} — limit close updated oid={Oid}",
+                            symbol, trackedSize, pos.Size, newOid);
+                        BeginInvoke(() => ShowOrderResult(symbol,
+                            $"📌 Limit close updated — {pos.Size:G6} @ {limitPrice:G8}", true));
+                    }
+                    else
+                    {
+                        _limitCloseOrders.Remove(symbol);
+                        Serilog.Log.Warning(
+                            "[LimitClose] {Symbol} failed to replace limit close after size change", symbol);
+                    }
+                }
             }
         }
 

@@ -433,14 +433,13 @@ namespace HyperliquidScanner.Services
             state.OrderInFlight = true;
             try
             {
-                // Fetch fresh mark price — avoids stale 5-second poll data at execution time
-                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct)
-                                 ?? pos.MarkPrice;
+                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct) ?? pos.MarkPrice;
                 Log.Debug("SL {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
                     pos.Symbol, freshPrice, pos.MarkPrice);
 
-                var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, freshPrice, pos.Size, szDec, ct);
+                var (ok, msg) = await PlaceCloseOrderAsync(
+                    pos.Symbol, isBuy, freshPrice, pos.Size, szDec,
+                    cfg.SlCloseIsLimit, cfg.SlCloseOffsetUsd, "SL", ct);
 
                 if (ok)
                 {
@@ -475,13 +474,13 @@ namespace HyperliquidScanner.Services
             state.OrderInFlight = true;
             try
             {
-                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct)
-                                 ?? pos.MarkPrice;
+                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct) ?? pos.MarkPrice;
                 Log.Debug("TP {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
                     pos.Symbol, freshPrice, pos.MarkPrice);
 
-                var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, freshPrice, closeSize, szDec, ct);
+                var (ok, msg) = await PlaceCloseOrderAsync(
+                    pos.Symbol, isBuy, freshPrice, closeSize, szDec,
+                    cfg.TpCloseIsLimit, cfg.TpCloseOffsetUsd, "TP", ct);
 
                 if (ok)
                 {
@@ -601,8 +600,9 @@ namespace HyperliquidScanner.Services
                 Log.Debug("Trail {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
                     pos.Symbol, freshPrice, pos.MarkPrice);
 
-                var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, freshPrice, closeSize, szDec, ct);
+                var (ok, msg) = await PlaceCloseOrderAsync(
+                    pos.Symbol, isBuy, freshPrice, closeSize, szDec,
+                    cfg.TrailingCloseIsLimit, cfg.TrailingCloseOffsetUsd, "Trailing", ct);
 
                 if (ok)
                 {
@@ -620,6 +620,29 @@ namespace HyperliquidScanner.Services
             finally
             {
                 state.OrderInFlight = false;
+            }
+        }
+
+        /// <summary>
+        /// Places either a limit or market close, depending on the isLimit flag.
+        /// When limit: price = freshPrice + offsetUsd (signed, so negative = below mark).
+        /// Returns (ok, message) in both cases.
+        /// </summary>
+        private async Task<(bool ok, string msg)> PlaceCloseOrderAsync(
+            string symbol, bool isBuy, decimal freshPrice, decimal size, int szDec,
+            bool isLimit, decimal offsetUsd, string triggerName, CancellationToken ct)
+        {
+            if (isLimit)
+            {
+                var limitPrice = freshPrice + offsetUsd;
+                Log.Debug("{Trigger} {Symbol}: limit close @ {Price:G6} (fresh {Fresh:G6} + offset {Off})",
+                    triggerName, symbol, limitPrice, freshPrice, offsetUsd);
+                var (ok, msg, _) = await _client.PlaceLimitCloseAsync(symbol, isBuy, limitPrice, size, szDec, ct);
+                return (ok, msg);
+            }
+            else
+            {
+                return await _client.PlaceMarketCloseAsync(symbol, isBuy, freshPrice, size, szDec, ct);
             }
         }
     }
