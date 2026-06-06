@@ -30,11 +30,22 @@ namespace HyperliquidScanner.Utils
         {
             var errors = new List<string>();
 
+            // Must have at least one wallet address — either via subAccounts or legacy field
             if (string.IsNullOrWhiteSpace(config.WalletAddress))
-                errors.Add("walletAddress is required.");
+                errors.Add("A wallet address is required. Set it in subAccounts (recommended) or walletAddress (legacy).");
 
             if (!config.WalletAddress.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                 errors.Add("walletAddress must start with 0x.");
+
+            // If subAccounts defined, exactly one must be active
+            if (config.SubAccounts.Count > 0)
+            {
+                var activeCount = config.SubAccounts.Count(s => s.Active);
+                if (activeCount == 0)
+                    errors.Add("subAccounts: at least one sub-account must have \"active\": true.");
+                if (activeCount > 1)
+                    errors.Add("subAccounts: only one sub-account can have \"active\": true.");
+            }
 
             if (config.BullishThreshold < 1 || config.BullishThreshold > 3)
                 errors.Add("bullishThreshold must be 1, 2, or 3.");
@@ -48,14 +59,24 @@ namespace HyperliquidScanner.Utils
 
         private static void CreateDefault(string path)
         {
-            var template = new AppConfig
+            // Build the template as a raw object so the JSON structure is exactly right
+            var template = new
             {
-                WalletAddress    = "0xYOUR_WALLET_ADDRESS",
-                PrivateKey       = "",
-                DefaultTimeframe = "1h",
-                MaxAssets        = 200,
-                BullishThreshold = 2,
-                RequestDelayMs   = 100
+                masterAccount = new { walletAddress = "0xYOUR_MASTER_WALLET_ADDRESS" },
+                subAccounts = new[]
+                {
+                    new { name = "HL for Longs",  walletAddress = "0xSUB_ACCOUNT_ADDRESS_1", privateKey = "", active = true  },
+                    new { name = "HL for Shorts", walletAddress = "0xSUB_ACCOUNT_ADDRESS_2", privateKey = "", active = false },
+                    new { name = "HL for Spot",   walletAddress = "0xSUB_ACCOUNT_ADDRESS_3", privateKey = "", active = false }
+                },
+                coinglassApiKey  = "",
+                defaultTimeframe = "1h",
+                maxAssets        = 200,
+                bullishThreshold = 2,
+                requestDelayMs   = 100,
+                hip3Dexes        = new[] { "xyz" },
+                portfolioGoalUsd = 1000,
+                symbolInfo       = Array.Empty<object>()
             };
 
             var json = JsonConvert.SerializeObject(template, Formatting.Indented);

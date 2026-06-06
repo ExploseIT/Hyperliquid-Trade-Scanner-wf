@@ -2,10 +2,43 @@ using Newtonsoft.Json;
 
 namespace HyperliquidScanner.Models
 {
-    public partial class AppConfig
+    /// <summary>
+    /// Master account — wallet address only, no private key (never trade from master).
+    /// </summary>
+    public class MasterAccountConfig
     {
         [JsonProperty("walletAddress")]
         public string WalletAddress { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// A named sub-account with its own wallet address and API private key.
+    /// Set active:true on exactly one sub-account to make it the trading account.
+    /// </summary>
+    public class SubAccountConfig
+    {
+        [JsonProperty("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonProperty("walletAddress")]
+        public string WalletAddress { get; set; } = string.Empty;
+
+        /// <summary>Hyperliquid API wallet private key for this sub-account.</summary>
+        [JsonProperty("privateKey")]
+        public string PrivateKey { get; set; } = string.Empty;
+
+        /// <summary>Set true on the sub-account the app should trade and monitor.</summary>
+        [JsonProperty("active")]
+        public bool Active { get; set; } = false;
+
+        public bool HasPrivateKey => !string.IsNullOrWhiteSpace(PrivateKey);
+    }
+
+    public partial class AppConfig
+    {
+        // ── Legacy flat fields (still work if no subAccounts defined) ────────
+        [JsonProperty("walletAddress")]
+        public string WalletAddressLegacy { get; set; } = string.Empty;
 
         /// <summary>
         /// Optional — only needed for private endpoints (positions, balances).
@@ -13,7 +46,36 @@ namespace HyperliquidScanner.Models
         /// Recommend using a Hyperliquid API sub-wallet key, not your main MetaMask key.
         /// </summary>
         [JsonProperty("privateKey")]
-        public string PrivateKey { get; set; } = string.Empty;
+        public string PrivateKeyLegacy { get; set; } = string.Empty;
+
+        // ── New multi-account structure ───────────────────────────────────────
+        /// <summary>Master account address (read-only — never trade from this).</summary>
+        [JsonProperty("masterAccount")]
+        public MasterAccountConfig? MasterAccount { get; set; }
+
+        /// <summary>List of sub-accounts. Set active:true on exactly one to use it.</summary>
+        [JsonProperty("subAccounts")]
+        public List<SubAccountConfig> SubAccounts { get; set; } = new();
+
+        // ── Computed: prefer active sub-account, fall back to legacy ─────────
+        [JsonIgnore]
+        public SubAccountConfig? ActiveSubAccount =>
+            SubAccounts.FirstOrDefault(s => s.Active);
+
+        /// <summary>Display name of the active trading account.</summary>
+        [JsonIgnore]
+        public string ActiveAccountName =>
+            ActiveSubAccount?.Name ?? "Main Account";
+
+        /// <summary>Wallet address of the active trading account.</summary>
+        [JsonIgnore]
+        public string WalletAddress =>
+            ActiveSubAccount?.WalletAddress ?? WalletAddressLegacy;
+
+        /// <summary>Private key of the active trading account.</summary>
+        [JsonIgnore]
+        public string PrivateKey =>
+            ActiveSubAccount?.PrivateKey ?? PrivateKeyLegacy;
 
         [JsonProperty("defaultTimeframe")]
         public string DefaultTimeframe { get; set; } = "1h";
@@ -87,6 +149,7 @@ namespace HyperliquidScanner.Models
         [JsonProperty("autoRefreshInterval")]
         public string AutoRefreshInterval { get; set; } = "Off";
 
+        [JsonIgnore]
         public bool HasPrivateKey => !string.IsNullOrWhiteSpace(PrivateKey);
     }
 }

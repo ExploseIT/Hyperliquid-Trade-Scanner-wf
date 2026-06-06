@@ -250,14 +250,16 @@ namespace HyperliquidScanner.Forms
         {
             _grid.Rows.Clear();
 
+            var accountTag = $"  [{_config.ActiveAccountName}]";
+
             if (positions.Count == 0)
             {
-                _header.Text = "Open Positions — none";
+                _header.Text = $"Open Positions — none{accountTag}";
                 return;
             }
 
             var visibleCount = positions.Count(p => !_config.GetRiskConfig(ResolveSymbol(p.Symbol)).GridViewDisabled);
-            _header.Text = $"Open Positions — {visibleCount} open" +
+            _header.Text = $"Open Positions — {visibleCount} open{accountTag}" +
                            (visibleCount < positions.Count ? $"  ({positions.Count - visibleCount} hidden)" : "");
 
             foreach (var p in positions)
