@@ -433,9 +433,14 @@ namespace HyperliquidScanner.Services
             state.OrderInFlight = true;
             try
             {
-                // Market close with built-in 5× retry
+                // Fetch fresh mark price — avoids stale 5-second poll data at execution time
+                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct)
+                                 ?? pos.MarkPrice;
+                Log.Debug("SL {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
+                    pos.Symbol, freshPrice, pos.MarkPrice);
+
                 var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice, pos.Size, szDec, ct);
+                    pos.Symbol, isBuy, freshPrice, pos.Size, szDec, ct);
 
                 if (ok)
                 {
@@ -470,8 +475,13 @@ namespace HyperliquidScanner.Services
             state.OrderInFlight = true;
             try
             {
+                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct)
+                                 ?? pos.MarkPrice;
+                Log.Debug("TP {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
+                    pos.Symbol, freshPrice, pos.MarkPrice);
+
                 var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
+                    pos.Symbol, isBuy, freshPrice, closeSize, szDec, ct);
 
                 if (ok)
                 {
@@ -585,9 +595,14 @@ namespace HyperliquidScanner.Services
             state.OrderInFlight = true;
             try
             {
-                // PlaceMarketCloseAsync already retries 5× internally for auth errors
+                // Fetch fresh mark price — avoids stale 5-second poll data at execution time
+                var freshPrice = await _client.GetFreshMarkPriceAsync(pos.Symbol, ct)
+                                 ?? pos.MarkPrice;
+                Log.Debug("Trail {Symbol} using price {Fresh:G6} (cached {Cached:G6})",
+                    pos.Symbol, freshPrice, pos.MarkPrice);
+
                 var (ok, msg) = await _client.PlaceMarketCloseAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice, closeSize, szDec, ct);
+                    pos.Symbol, isBuy, freshPrice, closeSize, szDec, ct);
 
                 if (ok)
                 {

@@ -27,7 +27,7 @@ namespace HyperliquidScanner.Services
         {
             _config = config;
             _http   = new HttpClient { BaseAddress = new Uri(BaseUrl) };
-            _http.DefaultRequestHeaders.Add("User-Agent", "HyperliquidScanner/1.0");
+            _http.DefaultRequestHeaders.Add("User-Agent", "LiquidScanner/1.0");
         }
 
         /// <summary>
@@ -180,6 +180,24 @@ namespace HyperliquidScanner.Services
             }
 
             return assets;
+        }
+
+        /// <summary>
+        /// Fetches the current live mid price for a single symbol.
+        /// Returns null on failure — callers should fall back to last known mark price.
+        /// </summary>
+        public async Task<decimal?> GetFreshMarkPriceAsync(string symbol, CancellationToken ct = default)
+        {
+            try
+            {
+                var mids = await GetAllMidsAsync(ct);
+                if (mids.TryGetValue(symbol, out var price) && price > 0) return price;
+                // HIP-3 assets: try base symbol
+                var baseSymbol = symbol.Contains(':') ? symbol.Split(':')[1] : symbol;
+                if (mids.TryGetValue(baseSymbol, out price) && price > 0) return price;
+            }
+            catch (Exception ex) { Log.Debug("GetFreshMarkPrice failed for {Symbol}: {Msg}", symbol, ex.Message); }
+            return null;
         }
 
         /// <summary>

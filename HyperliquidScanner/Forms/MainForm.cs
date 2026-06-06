@@ -155,7 +155,7 @@ namespace HyperliquidScanner.Forms
         {
             SuspendLayout();
 
-            Text          = "Hyperliquid Trend Scanner";
+            Text          = "Liquid Scanner";
             Size          = new Size(_coinglass != null ? 1280 : 980, 700);
             MinimumSize   = new Size(800, 500);
             StartPosition = FormStartPosition.CenterScreen;

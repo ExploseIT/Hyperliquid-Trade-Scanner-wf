@@ -166,9 +166,10 @@ namespace HyperliquidScanner.Forms
         // Latest mid prices for watchlist symbols (no open position)
         private Dictionary<string, decimal> _lastMids = new(StringComparer.OrdinalIgnoreCase);
 
-        // SR pre-order limit tracking: symbol → exchange order ID
+        // SR pre-order limit tracking: symbol → (order ID, time placed)
         // Cancelled automatically when position closes (if cancelonexit=true)
-        private readonly Dictionary<string, long> _srLimitOrders
+        // Grace period of 15s prevents race condition where refresh fires before new position is visible
+        private readonly Dictionary<string, (long oid, DateTime placedAt)> _srLimitOrders
             = new(StringComparer.OrdinalIgnoreCase);
 
         public async Task RefreshAsync(CancellationToken ct = default)
@@ -703,7 +704,7 @@ namespace HyperliquidScanner.Forms
                 if (existingOid.HasValue)
                 {
                     // Track it so we can cancel on exit, and skip placing a new one
-                    _srLimitOrders[pos.Symbol] = existingOid.Value;
+                    _srLimitOrders[pos.Symbol] = (existingOid.Value, DateTime.UtcNow);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} existing limit found oid={Oid} — skipping new order",
                         pos.Symbol, existingOid.Value);
@@ -745,7 +746,7 @@ namespace HyperliquidScanner.Forms
 
                 if (ok)
                 {
-                    _srLimitOrders[pos.Symbol] = oid;
+                    _srLimitOrders[pos.Symbol] = (oid, DateTime.UtcNow);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} limit {Side} @ {Price:G6}  size={Size}  oid={Oid}",
                         pos.Symbol, isBuy ? "BUY" : "SELL", limitPrice, limitSize, oid);
@@ -764,6 +765,8 @@ namespace HyperliquidScanner.Forms
             }
         }
 
+        private static readonly TimeSpan SRGracePeriod = TimeSpan.FromSeconds(15);
+
         private async Task CancelSRLimitsForClosedPositionsAsync(
             List<PositionInfo> openPositions, CancellationToken ct)
         {
@@ -775,19 +778,28 @@ namespace HyperliquidScanner.Forms
                 if (openSymbols.Contains(sym)) continue;
                 var riskCfg = _config.GetRiskConfig(sym);
                 if (!riskCfg.PreorderAtSRCancelOnExit) continue;
+
+                // Grace period — don't cancel if limit was placed very recently.
+                // Prevents race where refresh fires before new position appears in API response.
+                if (DateTime.UtcNow - _srLimitOrders[sym].placedAt < SRGracePeriod)
+                {
+                    Serilog.Log.Debug("[SR Preorder] {Symbol} cancel suppressed — within grace period", sym);
+                    continue;
+                }
+
                 await CancelSRLimitAsync(sym, ct);
             }
         }
 
         private async Task CancelSRLimitAsync(string symbol, CancellationToken ct = default)
         {
-            if (!_srLimitOrders.TryGetValue(symbol, out var oid)) return;
+            if (!_srLimitOrders.TryGetValue(symbol, out var entry)) return;
             var assetInfo = _client.GetAssetIndex(symbol);
             if (assetInfo != null)
             {
-                var (ok, msg) = await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+                var (ok, msg) = await _client.CancelOrderAsync(assetInfo.Value.index, entry.oid, ct);
                 Serilog.Log.Information("[SR Preorder] Cancel {Symbol} oid={Oid}: {Result}",
-                    symbol, oid, ok ? "ok" : msg);
+                    symbol, entry.oid, ok ? "ok" : msg);
             }
             _srLimitOrders.Remove(symbol);
         }

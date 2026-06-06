@@ -22,7 +22,7 @@ namespace HyperliquidScanner.Services
             _http   = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _http.DefaultRequestHeaders.Add("CG-API-KEY",  config.CoinglassApiKey);
             _http.DefaultRequestHeaders.Add("Accept",      "application/json");
-            _http.DefaultRequestHeaders.Add("User-Agent",  "HyperliquidScanner/1.0");
+            _http.DefaultRequestHeaders.Add("User-Agent",  "LiquidScanner/1.0");
         }
 
         // ── Snapshot: long/short totals for one coin (1h, 4h, 24h windows) ──

@@ -6,8 +6,9 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>HyperliquidScanner</AssemblyName>
+    <AssemblyName>LiquidScanner</AssemblyName>
     <RootNamespace>HyperliquidScanner</RootNamespace>
+    <Product>Liquid Scanner</Product>
   </PropertyGroup>
 
   <ItemGroup>

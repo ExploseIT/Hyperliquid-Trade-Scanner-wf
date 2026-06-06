@@ -23,12 +23,12 @@ namespace HyperliquidScanner.Utils
                     outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
                 .CreateLogger();
 
-            Log.Information("=== Hyperliquid Scanner started ===");
+            Log.Information("=== Liquid Scanner started ===");
         }
 
         public static void Shutdown()
         {
-            Log.Information("=== Hyperliquid Scanner stopped ===");
+            Log.Information("=== Liquid Scanner stopped ===");
             Log.CloseAndFlush();
         }
     }

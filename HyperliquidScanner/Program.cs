@@ -12,11 +12,11 @@ namespace HyperliquidScanner
         static void Main()
         {
             // Single-instance guard — prevent two copies running simultaneously
-            using var mutex = new System.Threading.Mutex(true, "HyperliquidScanner_SingleInstance",
+            using var mutex = new System.Threading.Mutex(true, "LiquidScanner_SingleInstance",
                 out bool isNewInstance);
             if (!isNewInstance)
             {
-                MessageBox.Show("Hyperliquid Scanner is already running.",
+                MessageBox.Show("Liquid Scanner is already running.",
                     "Already Running", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -60,7 +60,7 @@ namespace HyperliquidScanner
             catch (Exception ex)
             {
                 Log.Fatal(ex, "Startup error");
-                MessageBox.Show($"Startup error:\n\n{ex.Message}", "Hyperliquid Scanner",
+                MessageBox.Show($"Startup error:\n\n{ex.Message}", "Liquid Scanner",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
