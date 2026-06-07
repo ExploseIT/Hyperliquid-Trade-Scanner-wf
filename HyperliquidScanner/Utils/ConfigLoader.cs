@@ -37,14 +37,12 @@ namespace HyperliquidScanner.Utils
             if (!config.WalletAddress.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                 errors.Add("walletAddress must start with 0x.");
 
-            // If subAccounts defined, exactly one must be active
+            // If subAccounts defined, at least one must be active (multiple allowed)
             if (config.SubAccounts.Count > 0)
             {
                 var activeCount = config.SubAccounts.Count(s => s.Active);
                 if (activeCount == 0)
                     errors.Add("subAccounts: at least one sub-account must have \"active\": true.");
-                if (activeCount > 1)
-                    errors.Add("subAccounts: only one sub-account can have \"active\": true.");
             }
 
             if (config.BullishThreshold < 1 || config.BullishThreshold > 3)

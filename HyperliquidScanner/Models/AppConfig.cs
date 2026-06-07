@@ -27,11 +27,26 @@ namespace HyperliquidScanner.Models
         [JsonProperty("privateKey")]
         public string PrivateKey { get; set; } = string.Empty;
 
-        /// <summary>Set true on the sub-account the app should trade and monitor.</summary>
+        /// <summary>Set true on any sub-account to include it in monitoring and trading.</summary>
         [JsonProperty("active")]
         public bool Active { get; set; } = false;
 
+        /// <summary>Per-symbol risk config overrides for this sub-account. Overrides global symbolInfo.</summary>
+        [JsonProperty("symbolInfo")]
+        public List<SymbolRiskConfig> SymbolInfo { get; set; } = new();
+
         public bool HasPrivateKey => !string.IsNullOrWhiteSpace(PrivateKey);
+
+        /// <summary>
+        /// Returns risk config for a symbol from this sub-account's own symbolInfo.
+        /// Returns null if this sub-account has no symbolInfo (fall back to global).
+        /// </summary>
+        public SymbolRiskConfig? GetLocalRiskConfig(string symbol)
+        {
+            if (SymbolInfo.Count == 0) return null;
+            return SymbolInfo.FirstOrDefault(s => s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+                ?? SymbolInfo.FirstOrDefault(s => s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     public partial class AppConfig
@@ -57,22 +72,29 @@ namespace HyperliquidScanner.Models
         [JsonProperty("subAccounts")]
         public List<SubAccountConfig> SubAccounts { get; set; } = new();
 
-        // ── Computed: prefer active sub-account, fall back to legacy ─────────
+        // ── Computed: prefer active sub-accounts, fall back to legacy ────────
+        [JsonIgnore]
+        public IReadOnlyList<SubAccountConfig> ActiveSubAccounts =>
+            SubAccounts.Where(s => s.Active).ToList();
+
+        /// <summary>Primary active sub-account (first active). Null if legacy mode.</summary>
         [JsonIgnore]
         public SubAccountConfig? ActiveSubAccount =>
             SubAccounts.FirstOrDefault(s => s.Active);
 
-        /// <summary>Display name of the active trading account.</summary>
+        /// <summary>Display names of all active trading accounts, comma-separated.</summary>
         [JsonIgnore]
         public string ActiveAccountName =>
-            ActiveSubAccount?.Name ?? "Main Account";
+            ActiveSubAccounts.Count > 0
+                ? string.Join(" + ", ActiveSubAccounts.Select(s => s.Name))
+                : "Main Account";
 
-        /// <summary>Wallet address of the active trading account.</summary>
+        /// <summary>Wallet address of the primary active account (for legacy single-account uses).</summary>
         [JsonIgnore]
         public string WalletAddress =>
             ActiveSubAccount?.WalletAddress ?? WalletAddressLegacy;
 
-        /// <summary>Private key of the active trading account.</summary>
+        /// <summary>Private key of the primary active account (for legacy single-account uses).</summary>
         [JsonIgnore]
         public string PrivateKey =>
             ActiveSubAccount?.PrivateKey ?? PrivateKeyLegacy;

@@ -79,10 +79,33 @@ namespace HyperliquidScanner.Services
         public event Action<string, decimal>? SlWarning;
         public event Action<string>?          SlFiredAlert; // fires when SL triggers — for sound alert
 
-        public PositionMonitor(HyperliquidClient client, AppConfig config)
+        // Optional per-account symbolInfo override (takes priority over global config)
+        private readonly List<SymbolRiskConfig>? _symbolInfoOverride;
+
+        public PositionMonitor(HyperliquidClient client, AppConfig config,
+                               List<SymbolRiskConfig>? symbolInfoOverride = null)
         {
-            _client = client;
-            _config = config;
+            _client              = client;
+            _config              = config;
+            _symbolInfoOverride  = symbolInfoOverride;
+        }
+
+        /// <summary>
+        /// Returns risk config for a symbol — checks this monitor's symbolInfo override first,
+        /// then falls back to global config.
+        /// </summary>
+        private SymbolRiskConfig GetRiskConfig(string symbol)
+        {
+            if (_symbolInfoOverride != null && _symbolInfoOverride.Count > 0)
+            {
+                var exact = _symbolInfoOverride.FirstOrDefault(
+                    s => s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
+                if (exact != null) return exact;
+                var def = _symbolInfoOverride.FirstOrDefault(
+                    s => s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase));
+                if (def != null) return def;
+            }
+            return GetRiskConfig(symbol);
         }
 
         // ── Main check cycle ──────────────────────────────────────────────────
@@ -95,7 +118,7 @@ namespace HyperliquidScanner.Services
             // Only proceed if at least one symbol has SL or TP enabled
             var anyEnabled = positions.Any(p =>
             {
-                var cfg = _config.GetRiskConfig(p.Symbol);
+                var cfg = GetRiskConfig(p.Symbol);
                 return cfg.SlEnabled || cfg.TpEnabled;
             });
             if (!anyEnabled) return;
@@ -108,7 +131,7 @@ namespace HyperliquidScanner.Services
                 ct.ThrowIfCancellationRequested();
 
                 var isHip3     = pos.Symbol.Contains(':');
-                var riskConfig = _config.GetRiskConfig(pos.Symbol);
+                var riskConfig = GetRiskConfig(pos.Symbol);
 
                 // Force fresh state if the symbol was absent for at least one poll cycle
                 // (position closed and reopened between cycles — catches manual close+reopen)
@@ -362,7 +385,7 @@ namespace HyperliquidScanner.Services
         public (decimal slPrice, bool active)? GetExchangeTrailingInfo(string symbol)
         {
             if (!_states.TryGetValue(symbol, out var state)) return null;
-            var cfg = _config.GetRiskConfig(symbol);
+            var cfg = GetRiskConfig(symbol);
             if (!cfg.ExchangeTrailingEnabled) return null;
             if (state.ExchangeSlOrderId == 0) return (0, false);
             return (state.ExchangeSlPrice, true);
@@ -375,7 +398,7 @@ namespace HyperliquidScanner.Services
         public (decimal hwmUsd, bool active, bool fired)? GetTrailingInfo(string symbol)
         {
             if (!_states.TryGetValue(symbol, out var state)) return null;
-            var cfg = _config.GetRiskConfig(symbol);
+            var cfg = GetRiskConfig(symbol);
             if (!cfg.TrailingEnabled) return null;
             return (state.HighWaterMarkUsd, state.TrailingActive, state.TrailingFired);
         }

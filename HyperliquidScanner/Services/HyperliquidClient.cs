@@ -18,15 +18,22 @@ namespace HyperliquidScanner.Services
         private readonly HttpClient _http;
         private readonly AppConfig  _config;
 
+        // Credentials — may be overridden per sub-account
+        private readonly string _walletAddress;
+        private readonly string _privateKey;
+        private bool HasPrivateKey => !string.IsNullOrWhiteSpace(_privateKey);
+
         // Asset index cache: symbol → (universe index, size decimals)
         // Populated by InitialiseAssetIndexesAsync() on startup.
         private Dictionary<string, (int index, int szDecimals)> _assetIndexes
             = new(StringComparer.OrdinalIgnoreCase);
 
-        public HyperliquidClient(AppConfig config)
+        public HyperliquidClient(AppConfig config, SubAccountConfig? accountOverride = null)
         {
-            _config = config;
-            _http   = new HttpClient { BaseAddress = new Uri(BaseUrl) };
+            _config        = config;
+            _walletAddress = accountOverride?.WalletAddress ?? config.WalletAddress;
+            _privateKey    = accountOverride?.PrivateKey    ?? config.PrivateKey;
+            _http          = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _http.DefaultRequestHeaders.Add("User-Agent", "LiquidScanner/1.0");
         }
 
@@ -308,12 +315,12 @@ namespace HyperliquidScanner.Services
         /// </summary>
         public async Task<decimal?> GetAccountValueAsync(CancellationToken ct = default)
         {
-            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return null;
+            if (string.IsNullOrWhiteSpace(_walletAddress)) return null;
             try
             {
                 // Perps account value
                 var perpsResp = await PostInfoAsync(
-                    new { type = "clearinghouseState", user = _config.WalletAddress }, ct);
+                    new { type = "clearinghouseState", user = _walletAddress }, ct);
                 var perpsVal = perpsResp["marginSummary"]?["accountValue"]?.Value<string>();
                 decimal perps = 0m;
                 decimal.TryParse(perpsVal, System.Globalization.NumberStyles.Any,
@@ -321,7 +328,7 @@ namespace HyperliquidScanner.Services
 
                 // Spot USDC balance
                 var spotResp = await PostInfoAsync(
-                    new { type = "spotClearinghouseState", user = _config.WalletAddress }, ct);
+                    new { type = "spotClearinghouseState", user = _walletAddress }, ct);
                 decimal spot = 0m;
                 if (spotResp["balances"] is JArray balances)
                 {
@@ -352,7 +359,7 @@ namespace HyperliquidScanner.Services
         public async Task<List<PositionInfo>> GetPositionsAsync(CancellationToken ct = default)
         {
             var positions = new List<PositionInfo>();
-            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return positions;
+            if (string.IsNullOrWhiteSpace(_walletAddress)) return positions;
 
             // Fetch main HL positions + each configured HIP-3 dex separately
             var dexesToFetch = new List<string?> { null }; // null = main HL universe
@@ -363,8 +370,8 @@ namespace HyperliquidScanner.Services
                 try
                 {
                     object payload = dex == null
-                        ? new { type = "clearinghouseState", user = _config.WalletAddress }
-                        : (object)new { type = "clearinghouseState", user = _config.WalletAddress, dex };
+                        ? new { type = "clearinghouseState", user = _walletAddress }
+                        : (object)new { type = "clearinghouseState", user = _walletAddress, dex };
 
                     var response       = await PostInfoAsync(payload, ct);
                     var assetPositions = response["assetPositions"] as JArray;
@@ -438,14 +445,14 @@ namespace HyperliquidScanner.Services
         /// </summary>
         public async Task<JToken> GetAccountStateAsync(CancellationToken ct = default)
         {
-            if (!_config.HasPrivateKey)
+            if (!HasPrivateKey)
                 throw new InvalidOperationException(
                     "privateKey must be set in config.json to access account data.");
 
             var payload = new
             {
                 type = "clearinghouseState",
-                user = _config.WalletAddress
+                user = _walletAddress
             };
 
             // This endpoint is actually public — Hyperliquid lets you query
@@ -544,7 +551,7 @@ namespace HyperliquidScanner.Services
             int szDecimals, string tif, CancellationToken ct,
             bool reduceOnly = true, string? vaultAddress = null)
         {
-            if (!_config.HasPrivateKey)
+            if (!HasPrivateKey)
                 return (false, "No private key configured — cannot place orders.", 0);
 
             var assetInfo = GetAssetIndex(symbol);
@@ -569,7 +576,7 @@ namespace HyperliquidScanner.Services
                     assetIndex, isBuy, priceStr, sizeStr, reduceOnly, tif);
 
                 // Sign
-                var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+                var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
 
                 // Build request
                 var action = new
@@ -660,10 +667,10 @@ namespace HyperliquidScanner.Services
             GetOpenOrdersAsync(CancellationToken ct = default)
         {
             var result = new List<(long, int, bool, decimal, decimal)>();
-            if (string.IsNullOrWhiteSpace(_config.WalletAddress)) return result;
+            if (string.IsNullOrWhiteSpace(_walletAddress)) return result;
             try
             {
-                var payload  = new { type = "openOrders", user = _config.WalletAddress };
+                var payload  = new { type = "openOrders", user = _walletAddress };
                 var response = await PostInfoAsync(payload, ct);
                 if (response is not JArray arr) return result;
                 foreach (var o in arr)
@@ -715,10 +722,10 @@ namespace HyperliquidScanner.Services
         public async Task<(bool ok, string message)> CancelOrderAsync(
             int assetIndex, long orderId, CancellationToken ct = default)
         {
-            if (!_config.HasPrivateKey) return (false, "No private key configured.");
+            if (!HasPrivateKey) return (false, "No private key configured.");
             var nonce       = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var actionBytes = HyperliquidSigner.SerializeCancelOrder(assetIndex, orderId);
-            var (r, s, v)   = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+            var (r, s, v)   = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
             var body = new
             {
                 action    = new { type = "cancel", cancels = new[] { new { a = assetIndex, o = orderId } } },
@@ -749,7 +756,7 @@ namespace HyperliquidScanner.Services
             decimal size, int szDecimals, string tpsl, bool isMarket,
             CancellationToken ct = default)
         {
-            if (!_config.HasPrivateKey) return (false, "No private key.", 0);
+            if (!HasPrivateKey) return (false, "No private key.", 0);
             var assetInfo = GetAssetIndex(symbol);
             if (assetInfo == null) return (false, $"Asset index unknown for {symbol}", 0);
 
@@ -762,7 +769,7 @@ namespace HyperliquidScanner.Services
 
             var actionBytes = HyperliquidSigner.SerializeTriggerOrder(
                 assetIndex, isBuy, priceStr, trigStr, sizeStr, true, tpsl, isMarket);
-            var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _config.PrivateKey);
+            var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
 
             var body = new
             {

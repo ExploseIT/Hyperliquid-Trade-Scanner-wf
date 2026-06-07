@@ -41,7 +41,7 @@ namespace HyperliquidScanner.Forms
         private Label             _alertBar            = null!;  // dedicated RSI-LL alert strip
         private LiquidationPanel? _liqPanel;
         private PositionsPanel?   _positionsPanel;
-        private PositionMonitor?  _monitor;
+        private readonly AccountManager? _accountManager;
 
         private readonly BinanceLiquidationFeed?  _binanceFeed;
         private readonly BybitLiquidationFeed?   _bybitFeed;
@@ -60,16 +60,16 @@ namespace HyperliquidScanner.Forms
         private Dictionary<string, LiquidationAggregator.SymbolSummary> _liqSummaries
             = new(StringComparer.OrdinalIgnoreCase);
 
-        public MainForm(AppConfig config, AppSettings appSettings, HyperliquidClient client,
-                        ScannerService scanner, PositionMonitor? monitor = null,
+        public MainForm(AppConfig config, AppSettings appSettings, AccountManager accountManager,
+                        ScannerService scanner,
                         AutoEntryManager? autoEntry = null, CoinglassClient? coinglass = null)
         {
-            _config      = config;
-            _appSettings = appSettings;
-            _client      = client;
-            _scanner     = scanner;
-            _monitor     = monitor;
-            _coinglass   = coinglass;
+            _config         = config;
+            _appSettings    = appSettings;
+            _client         = accountManager.Primary.Client;
+            _scanner        = scanner;
+            _accountManager = accountManager;
+            _coinglass      = coinglass;
 
             // Load custom alert sounds — fall back to system sounds if files not found
             var squeezePath     = AppSettingsLoader.ResolveSoundPath(_appSettings.SqueezeSoundFile);
@@ -86,14 +86,17 @@ namespace HyperliquidScanner.Forms
             _entryFilledSound   = entryFilledPath != null ? new AudioPlayer(entryFilledPath) : null;
             ApplySoundVolume(_appSettings.SoundVolume);
 
-            // Wire SL sound alert
-            if (monitor != null)
-                monitor.SlFiredAlert += sym => BeginInvoke(() =>
+            // Wire SL sound alert from all active account monitors
+            foreach (var account in accountManager.Accounts)
+            {
+                if (account.Monitor == null) continue;
+                account.Monitor.SlFiredAlert += sym => BeginInvoke(() =>
                 {
                     try { if (_slTriggeredSound != null) _slTriggeredSound.Play();
                           else System.Media.SystemSounds.Hand.Play(); }
                     catch { }
                 });
+            }
 
             _autoEntry = autoEntry;
             if (_autoEntry != null)
@@ -403,7 +406,7 @@ namespace HyperliquidScanner.Forms
 
             // Centre panel: asset grid on top, positions panel below with draggable splitter
             // (liquidation panel occupies the right side separately)
-            _positionsPanel = new PositionsPanel(_client, _config, _monitor);
+            _positionsPanel = new PositionsPanel(_accountManager!, _config);
             // Remove fixed dock — SplitContainer manages layout instead
             _positionsPanel.Dock = DockStyle.Fill;
             _grid.Dock           = DockStyle.Fill;
@@ -1106,7 +1109,8 @@ namespace HyperliquidScanner.Forms
                 _config.RequestDelayMs      = fresh.RequestDelayMs;
 
                 // Reset monitor state — new thresholds apply cleanly
-                _monitor?.Reset();
+                foreach (var account in _accountManager?.Accounts ?? Array.Empty<AccountContext>())
+                    account.Monitor?.Reset();
 
                 _statusLabel.Text      = "⟳ config.json reloaded — risk settings updated";
                 _statusLabel.ForeColor = Color.FromArgb(100, 180, 255);

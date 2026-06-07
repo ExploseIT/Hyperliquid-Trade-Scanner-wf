@@ -29,19 +29,18 @@ namespace HyperliquidScanner
             {
                 var config      = ConfigLoader.Load();
                 var appSettings = AppSettingsLoader.Load();
-                var client      = new HyperliquidClient(config);
-                var scanner     = new ScannerService(client, config);
+
+                // Build multi-account manager — one client+monitor per active sub-account
+                var accountManager = AccountManager.Create(config);
+                var primaryClient  = accountManager.Primary.Client;
+
+                var scanner = new ScannerService(primaryClient, config);
                 scanner.Analyser.RsiLowerLowMinDropPct     = appSettings.RsiLowerLowMinDropPct;
                 scanner.Analyser.RsiLowerLowConfirmCandles = appSettings.RsiLowerLowConfirmCandles;
 
-                // Position monitor — only active if private key is configured
-                PositionMonitor? monitor = config.HasPrivateKey
-                    ? new PositionMonitor(client, config)
-                    : null;
-
-                // Auto entry manager — Phase 3
+                // Auto entry manager — Phase 3 (uses primary account)
                 AutoEntryManager? autoEntry = config.HasPrivateKey
-                    ? new AutoEntryManager(client, config)
+                    ? new AutoEntryManager(primaryClient, config)
                     : null;
 
                 // Coinglass panel is optional — only shown if API key is configured
@@ -49,7 +48,7 @@ namespace HyperliquidScanner
                     ? new CoinglassClient(config)
                     : null;
 
-                Application.Run(new MainForm(config, appSettings, client, scanner, monitor, autoEntry, coinglass));
+                Application.Run(new MainForm(config, appSettings, accountManager, scanner, autoEntry, coinglass));
             }
             catch (FileNotFoundException ex)
             {

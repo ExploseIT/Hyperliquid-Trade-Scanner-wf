@@ -10,9 +10,8 @@ namespace HyperliquidScanner.Forms
     /// </summary>
     public class PositionsPanel : Panel
     {
-        private readonly HyperliquidClient _client;
+        private readonly AccountManager    _accountManager;
         private readonly AppConfig         _config;
-        private readonly PositionMonitor?  _monitor;
 
         private DataGridView                _grid    = null!;
         private Label                       _header  = null!;
@@ -24,17 +23,20 @@ namespace HyperliquidScanner.Forms
         private HashSet<string>    _hip3Assets   = new(StringComparer.OrdinalIgnoreCase);
         private bool               _scanInProgress = false;
 
+        // ── Dict key helpers — include account name so same symbol in two accounts works ──
+        private static string DK(string accountName, string symbol) => $"{accountName}::{symbol}";
+        private static string DK(PositionInfo pos) => $"{pos.AccountName}::{pos.Symbol}";
+
         // ── Limit entry bracket tracking ─────────────────────────────────────
         /// <summary>Pending limit entry orders — when filled, bracket (TP/SL) is placed.</summary>
         private record PendingBracket(long Oid, decimal? TpPrice, decimal? SlPrice,
-                                      int SzDecimals, bool IsLong);
-        private readonly Dictionary<string, PendingBracket> _pendingLimitEntries
-            = new(StringComparer.OrdinalIgnoreCase);
+                                      int SzDecimals, bool IsLong, string AccountName);
+        private readonly Dictionary<string, PendingBracket> _pendingLimitEntries = new();
 
         // ── Limit close tracking ─────────────────────────────────────────────
         /// <summary>Active limit close orders — auto-updated when position size changes.</summary>
         private readonly Dictionary<string, (long Oid, decimal LimitPrice, decimal TrackedSize)>
-            _limitCloseOrders = new(StringComparer.OrdinalIgnoreCase);
+            _limitCloseOrders = new();
 
         /// <summary>
         /// Called when a full asset scan starts/stops.
@@ -69,18 +71,34 @@ namespace HyperliquidScanner.Forms
             return match ?? coin;
         }
 
-        public PositionsPanel(HyperliquidClient client, AppConfig config,
-                              PositionMonitor? monitor = null)
+        /// <summary>Shortens an account name for the grid — "HL for Shorts" → "Shorts".</summary>
+        private static string ShortAccountName(string name)
         {
-            _client  = client;
-            _config  = config;
-            _monitor = monitor;
+            if (string.IsNullOrWhiteSpace(name)) return "";
+            var parts = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length > 0 ? parts[^1] : name;
+        }
 
-            if (_monitor != null)
+        /// <summary>Resolves the account context that owns a position (or the primary if unknown).</summary>
+        private AccountContext GetAccount(PositionInfo pos) =>
+            (string.IsNullOrEmpty(pos.AccountName) ? null : _accountManager.GetByName(pos.AccountName))
+            ?? _accountManager.Primary;
+
+        /// <summary>Returns risk config for a position — checks its owning account first.</summary>
+        private SymbolRiskConfig GetRiskConfig(PositionInfo pos) =>
+            GetAccount(pos).GetRiskConfig(pos.Symbol);
+
+        public PositionsPanel(AccountManager accountManager, AppConfig config)
+        {
+            _accountManager = accountManager;
+            _config         = config;
+
+            foreach (var account in _accountManager.Accounts)
             {
-                _monitor.OrderPlaced += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, true));
-                _monitor.OrderFailed += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, false));
-                _monitor.SlWarning   += (sym, pnl) => BeginInvoke(() => HighlightSlWarning(sym));
+                if (account.Monitor == null) continue;
+                account.Monitor.OrderPlaced += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, true));
+                account.Monitor.OrderFailed += (sym, msg) => BeginInvoke(() => ShowOrderResult(sym, msg, false));
+                account.Monitor.SlWarning   += (sym, pnl) => BeginInvoke(() => HighlightSlWarning(sym));
             }
 
             Dock = DockStyle.Fill;
@@ -134,6 +152,7 @@ namespace HyperliquidScanner.Forms
 
             _grid.Columns.AddRange(
                 new DataGridViewTextBoxColumn { HeaderText = "Symbol",   Name = "Symbol",   MinimumWidth = 80  },
+                new DataGridViewTextBoxColumn { HeaderText = "Acct",     Name = "Acct",     MinimumWidth = 65  },
                 new DataGridViewTextBoxColumn { HeaderText = "Side",     Name = "Side",     MinimumWidth = 55  },
                 new DataGridViewTextBoxColumn { HeaderText = "Size",     Name = "Size",     MinimumWidth = 70  },
                 new DataGridViewTextBoxColumn { HeaderText = "Entry",    Name = "Entry",    MinimumWidth = 75  },
@@ -188,11 +207,11 @@ namespace HyperliquidScanner.Forms
         {
             try
             {
-                // ── Fetch fresh position data — always runs, independent of asset scanner ──
-                var positions = await _client.GetPositionsAsync(ct);
+                // ── Fetch fresh position data from ALL active accounts, merged & tagged ──
+                var positions = await _accountManager.GetAllPositionsAsync(ct);
 
-                // Fetch mid prices for watchlist symbols
-                try { _lastMids = await _client.GetAllMidsAsync(ct); }
+                // Fetch mid prices for watchlist symbols (any client — market data is global)
+                try { _lastMids = await _accountManager.Primary.Client.GetAllMidsAsync(ct); }
                 catch { /* non-fatal — watchlist rows will show – for price */ }
 
                 if (positions.Count == 0 && _positions.Count > 0)
@@ -208,16 +227,29 @@ namespace HyperliquidScanner.Forms
                     _positions = positions;
                 }
 
-                // Auto-cancel SR pre-orders for positions that have closed
-                await CancelSRLimitsForClosedPositionsAsync(_positions, ct);
-
-                // Check if pending limit entry orders have filled → place bracket
-                // Sync limit close orders to current position size
-                if (_pendingLimitEntries.Count > 0 || _limitCloseOrders.Count > 0)
+                // ── Per-account housekeeping: SR cancels, bracket fills, limit-close sync, monitor ──
+                foreach (var account in _accountManager.Accounts)
                 {
-                    var openOrders = await _client.GetOpenOrdersAsync(ct);
-                    await CheckPendingLimitEntriesAsync(_positions, openOrders, ct);
-                    await SyncLimitCloseOrdersAsync(_positions, openOrders, ct);
+                    var acctPositions = _positions
+                        .Where(p => p.AccountName.Equals(account.Name, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    await CancelSRLimitsForClosedPositionsAsync(account, acctPositions, ct);
+
+                    var prefix = account.Name + "::";
+                    bool hasPending    = _pendingLimitEntries.Keys.Any(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+                    bool hasLimitClose = _limitCloseOrders.Keys.Any(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+                    if (hasPending || hasLimitClose)
+                    {
+                        var openOrders = await account.Client.GetOpenOrdersAsync(ct);
+                        await CheckPendingLimitEntriesAsync(account, acctPositions, openOrders, ct);
+                        await SyncLimitCloseOrdersAsync(account, acctPositions, openOrders, ct);
+                    }
+
+                    // Run this account's monitor against its own positions only
+                    if (account.Monitor != null && acctPositions.Count > 0)
+                        await account.Monitor.CheckPositionsAsync(acctPositions, ct);
                 }
 
                 // Always refresh grid from cached data — even during scans
@@ -227,10 +259,6 @@ namespace HyperliquidScanner.Forms
                         UpdateGrid(_positions, _lastMids);
                         PositionsRefreshed?.Invoke(_positions);
                     });
-
-                // Always run monitor against cached data — trailing/TP/SL keep ticking
-                if (_monitor != null && _positions.Count > 0)
-                    await _monitor.CheckPositionsAsync(_positions, ct);
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
@@ -271,7 +299,7 @@ namespace HyperliquidScanner.Forms
         {
             _grid.Rows.Clear();
 
-            var accountTag = $"  [{_config.ActiveAccountName}]";
+            var accountTag = $"  [{string.Join(" + ", _accountManager.Accounts.Select(a => a.Name))}]";
 
             if (positions.Count == 0)
             {
@@ -279,7 +307,7 @@ namespace HyperliquidScanner.Forms
                 return;
             }
 
-            var visibleCount = positions.Count(p => !_config.GetRiskConfig(ResolveSymbol(p.Symbol)).GridViewDisabled);
+            var visibleCount = positions.Count(p => !GetRiskConfig(p).GridViewDisabled);
             _header.Text = $"Open Positions — {visibleCount} open{accountTag}" +
                            (visibleCount < positions.Count ? $"  ({positions.Count - visibleCount} hidden)" : "");
 
@@ -287,7 +315,8 @@ namespace HyperliquidScanner.Forms
             {
                 p.Symbol = ResolveSymbol(p.Symbol); // resolve HIP-3 prefix if needed
 
-                var riskCfg  = _config.GetRiskConfig(p.Symbol);
+                var account  = GetAccount(p);
+                var riskCfg  = account.GetRiskConfig(p.Symbol);
 
                 // Skip positions marked as hidden in config
                 if (riskCfg.GridViewDisabled) continue;
@@ -317,8 +346,8 @@ namespace HyperliquidScanner.Forms
                     tpText = "–";
                 }
 
-                var status   = _monitor?.GetStatus(p.Symbol) ?? SymbolRiskStatus.Normal;
-                var rsiSlope = _monitor?.GetRsiSlope(p.Symbol);
+                var status   = account.Monitor?.GetStatus(p.Symbol) ?? SymbolRiskStatus.Normal;
+                var rsiSlope = account.Monitor?.GetRsiSlope(p.Symbol);
                 var slopeStr = rsiSlope.HasValue && (riskCfg.SlEnabled || riskCfg.TpEnabled)
                     ? $" RSI↕{rsiSlope.Value:F1}"
                     : string.Empty;
@@ -338,7 +367,7 @@ namespace HyperliquidScanner.Forms
                 if (riskCfg.ExchangeTrailingEnabled)
                 {
                     // Exchange-native ratcheting trailing
-                    var exTrail = _monitor?.GetExchangeTrailingInfo(p.Symbol);
+                    var exTrail = account.Monitor?.GetExchangeTrailingInfo(p.Symbol);
                     if (exTrail == null || !exTrail.Value.active)
                         trailText = $"📌 Wait ${riskCfg.TrailingMinProfitUsd:F2}";
                     else
@@ -347,7 +376,7 @@ namespace HyperliquidScanner.Forms
                 else if (riskCfg.TrailingEnabled)
                 {
                     // App-side trailing
-                    var trail = _monitor?.GetTrailingInfo(p.Symbol);
+                    var trail = account.Monitor?.GetTrailingInfo(p.Symbol);
                     if (trail == null)
                         trailText = $"Min ${riskCfg.TrailingMinProfitUsd:F2}";
                     else if (trail.Value.fired)
@@ -360,6 +389,7 @@ namespace HyperliquidScanner.Forms
 
                 var idx = _grid.Rows.Add(
                     p.Symbol,
+                    ShortAccountName(account.Name),
                     p.SideLabel,
                     p.Size.ToString("G6"),
                     p.EntryPrice.ToString("G6"),
@@ -380,28 +410,38 @@ namespace HyperliquidScanner.Forms
                 _grid.Rows[idx].Tag = p;
             }
 
-            // ── Watchlist: configured symbols with no open position ────────────
-            var openSymbols = positions
-                .Select(p => p.Symbol)
+            // ── Watchlist: configured symbols (per account) with no open position ──
+            var openKeys = positions
+                .Select(p => DK(p.AccountName, p.Symbol))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var watchlist = _config.SymbolInfo
-                .Where(s => s.TradeEntryEnabled &&
-                            !s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase) &&
-                            !openSymbols.Contains(s.Symbol))
-                .ToList();
+            var watchlist = new List<(AccountContext account, SymbolRiskConfig cfg)>();
+            foreach (var account in _accountManager.Accounts)
+            {
+                var effectiveSymbolInfo = account.Config.SymbolInfo.Count > 0
+                    ? account.Config.SymbolInfo
+                    : _config.SymbolInfo;
+
+                foreach (var s in effectiveSymbolInfo)
+                {
+                    if (!s.TradeEntryEnabled) continue;
+                    if (s.Symbol.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (openKeys.Contains(DK(account.Name, s.Symbol))) continue;
+                    watchlist.Add((account, s));
+                }
+            }
 
             if (watchlist.Count == 0) return;
 
             // Separator row
-            var sepIdx = _grid.Rows.Add("── Watchlist ──", "", "", "", "", "", "", "", "", "", "", "", "", "");
+            var sepIdx = _grid.Rows.Add("── Watchlist ──", "", "", "", "", "", "", "", "", "", "", "", "", "", "");
             _grid.Rows[sepIdx].Tag              = null; // no PositionInfo — click handlers skip it
             _grid.Rows[sepIdx].DefaultCellStyle.BackColor  = Color.FromArgb(28, 28, 28);
             _grid.Rows[sepIdx].DefaultCellStyle.ForeColor  = Color.FromArgb(80, 80, 80);
             _grid.Rows[sepIdx].DefaultCellStyle.Font       = new Font("Segoe UI", 8f, FontStyle.Italic);
             _grid.Rows[sepIdx].Height = 18;
 
-            foreach (var cfg in watchlist)
+            foreach (var (account, cfg) in watchlist)
             {
                 // Resolve symbol name (HIP-3 aware)
                 var sym      = cfg.Symbol;
@@ -414,15 +454,17 @@ namespace HyperliquidScanner.Forms
                 // Synthetic PositionInfo so + button click handler works unchanged
                 var synthetic = new PositionInfo
                 {
-                    Symbol     = sym,
-                    IsLong     = cfg.TradeIsLong,
-                    MarkPrice  = markPrice,
-                    Size       = 0
+                    Symbol      = sym,
+                    AccountName = account.Name,
+                    IsLong      = cfg.TradeIsLong,
+                    MarkPrice   = markPrice,
+                    Size        = 0
                 };
 
                 var direction = cfg.TradeIsLong ? "Long" : "Short";
                 var wIdx = _grid.Rows.Add(
                     sym,
+                    ShortAccountName(account.Name),
                     direction,
                     "–", "–",
                     markText,
@@ -544,7 +586,7 @@ namespace HyperliquidScanner.Forms
                 // Only paint button if entry is configured for this row
                 if (_grid.Rows[e.RowIndex].Tag is PositionInfo rp)
                 {
-                    var rc = _config.GetRiskConfig(rp.Symbol);
+                    var rc = GetAccount(rp).GetRiskConfig(rp.Symbol);
                     if (rc.TradeEntryEnabled)
                     {
                         var eb = new Rectangle(
@@ -612,13 +654,14 @@ namespace HyperliquidScanner.Forms
             if (colName == "Enter")
             {
                 if (_grid.Rows[e.RowIndex].Tag is not PositionInfo pos) return;
-                var riskCfg = _config.GetRiskConfig(pos.Symbol);
+                var account = GetAccount(pos);
+                var riskCfg = account.GetRiskConfig(pos.Symbol);
                 if (!riskCfg.TradeEntryEnabled) return;
 
                 var direction = riskCfg.TradeIsLong ? "Long" : "Short";
                 var notional  = riskCfg.TradeEntrySizeUsd * riskCfg.TradeLeverage;
                 if (pos.MarkPrice <= 0) { ShowEntryError(pos.Symbol, "No price available — retry in a moment"); return; }
-                var assetInfo = _client.GetAssetIndex(pos.Symbol);
+                var assetInfo = account.Client.GetAssetIndex(pos.Symbol);
                 if (assetInfo == null) { ShowEntryError(pos.Symbol, $"Asset index not found for {pos.Symbol} — ensure the scanner has run at least once"); return; }
                 var size      = Math.Round(notional / pos.MarkPrice,
                                     assetInfo.Value.szDecimals, MidpointRounding.ToZero);
@@ -631,7 +674,7 @@ namespace HyperliquidScanner.Forms
                         $"Limit {direction} Entry — {pos.Symbol}",
                         pos.MarkPrice, riskCfg.TradeOrderOffsetUsd, sizeDesc, showBracket: true);
                     if (dlg.ShowDialog(this) != DialogResult.OK || dlg.LimitPrice == null) return;
-                    _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
+                    _ = EnterPositionAsync(account, pos, riskCfg, size, assetInfo.Value.szDecimals,
                                            assetInfo.Value.index, limitPrice: dlg.LimitPrice,
                                            tpPrice: dlg.TpPrice, slPrice: dlg.SlPrice);
                 }
@@ -651,7 +694,7 @@ namespace HyperliquidScanner.Forms
                         MessageBoxIcon.Question,
                         MessageBoxDefaultButton.Button2);
                     if (confirm != DialogResult.Yes) return;
-                    _ = EnterPositionAsync(pos, riskCfg, size, assetInfo.Value.szDecimals,
+                    _ = EnterPositionAsync(account, pos, riskCfg, size, assetInfo.Value.szDecimals,
                                            assetInfo.Value.index);
                 }
                 return;
@@ -660,7 +703,8 @@ namespace HyperliquidScanner.Forms
             if (colName != "Close") return;
             if (_grid.Rows[e.RowIndex].Tag is not PositionInfo closePos) return;
 
-            var closeRiskCfg = _config.GetRiskConfig(closePos.Symbol);
+            var closeAccount = GetAccount(closePos);
+            var closeRiskCfg = closeAccount.GetRiskConfig(closePos.Symbol);
             if (closeRiskCfg.TradeCloseIsLimit)
             {
                 // ── Limit close — show price dialog ──────────────────────────
@@ -670,7 +714,7 @@ namespace HyperliquidScanner.Forms
                     $"Limit Close — {closePos.SideLabel} {closePos.Symbol}",
                     closePos.MarkPrice, closeRiskCfg.TradeCloseOffsetUsd, sizeDesc);
                 if (dlg.ShowDialog(this) != DialogResult.OK || dlg.LimitPrice == null) return;
-                _ = ClosePositionAsync(closePos, cancelSRLimit: true, limitPrice: dlg.LimitPrice);
+                _ = ClosePositionAsync(closeAccount, closePos, cancelSRLimit: true, limitPrice: dlg.LimitPrice);
             }
             else
             {
@@ -686,7 +730,7 @@ namespace HyperliquidScanner.Forms
                     MessageBoxIcon.Warning,
                     MessageBoxDefaultButton.Button2);
                 if (closeConfirm != DialogResult.Yes) return;
-                _ = ClosePositionAsync(closePos, cancelSRLimit: true);
+                _ = ClosePositionAsync(closeAccount, closePos, cancelSRLimit: true);
             }
         }
 
@@ -713,7 +757,7 @@ namespace HyperliquidScanner.Forms
             t.Start();
         }
 
-        private async Task EnterPositionAsync(PositionInfo pos, SymbolRiskConfig riskCfg,
+        private async Task EnterPositionAsync(AccountContext account, PositionInfo pos, SymbolRiskConfig riskCfg,
                                                decimal size, int szDecimals, int assetIndex,
                                                decimal? limitPrice = null,
                                                decimal? tpPrice    = null,
@@ -727,30 +771,30 @@ namespace HyperliquidScanner.Forms
 
                 // ── SR pre-order limit (if configured) ───────────────────────
                 if (riskCfg.PreorderAtSREnabled && riskCfg.PreorderAtSRSizeUsd > 0)
-                    await PlaceSRPreorderAsync(pos, riskCfg, isBuy, assetIndex, szDecimals);
+                    await PlaceSRPreorderAsync(account, pos, riskCfg, isBuy, assetIndex, szDecimals);
 
                 // ── Entry order ───────────────────────────────────────────────
                 bool ok; string msg; long oid = 0;
                 if (isLimit)
                 {
-                    (ok, msg, oid) = await _client.PlaceLimitEntryAsync(
+                    (ok, msg, oid) = await account.Client.PlaceLimitEntryAsync(
                         pos.Symbol, isBuy, limitPrice!.Value, size, szDecimals);
                 }
                 else
                 {
-                    (ok, msg) = await _client.PlaceMarketEntryAsync(
+                    (ok, msg) = await account.Client.PlaceMarketEntryAsync(
                         pos.Symbol, isBuy, pos.MarkPrice, size, szDecimals);
                 }
 
                 if (ok)
                 {
-                    _monitor?.ClearSymbol(pos.Symbol);
+                    account.Monitor?.ClearSymbol(pos.Symbol);
 
                     // Track pending limit entry for bracket placement on fill
                     if (isLimit && oid > 0 && (tpPrice.HasValue || slPrice.HasValue))
                     {
-                        _pendingLimitEntries[pos.Symbol] =
-                            new PendingBracket(oid, tpPrice, slPrice, szDecimals, isBuy);
+                        _pendingLimitEntries[DK(account.Name, pos.Symbol)] =
+                            new PendingBracket(oid, tpPrice, slPrice, szDecimals, isBuy, account.Name);
                         Serilog.Log.Information(
                             "[Bracket] {Symbol} pending — oid={Oid} TP={Tp} SL={Sl}",
                             pos.Symbol, oid, tpPrice, slPrice);
@@ -772,19 +816,19 @@ namespace HyperliquidScanner.Forms
             }
         }
 
-        private async Task PlaceSRPreorderAsync(PositionInfo pos, SymbolRiskConfig riskCfg,
+        private async Task PlaceSRPreorderAsync(AccountContext account, PositionInfo pos, SymbolRiskConfig riskCfg,
                                                  bool isBuy, int assetIndex, int szDecimals)
         {
             try
             {
                 // Check if an SR-style limit already exists on the exchange
-                var existingOid = await _client.FindExistingSRLimitAsync(
+                var existingOid = await account.Client.FindExistingSRLimitAsync(
                     pos.Symbol, isBuy, pos.MarkPrice);
 
                 if (existingOid.HasValue)
                 {
                     // Track it so we can cancel on exit, and skip placing a new one
-                    _srLimitOrders[pos.Symbol] = (existingOid.Value, DateTime.UtcNow);
+                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (existingOid.Value, DateTime.UtcNow);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} existing limit found oid={Oid} — skipping new order",
                         pos.Symbol, existingOid.Value);
@@ -793,7 +837,7 @@ namespace HyperliquidScanner.Forms
                     return;
                 }
 
-                var candles = await _client.GetCandlesAsync(pos.Symbol, riskCfg.SRTimeframe, 100);
+                var candles = await account.Client.GetCandlesAsync(pos.Symbol, riskCfg.SRTimeframe, 100);
                 if (candles == null || candles.Count == 0) return;
 
                 decimal? srLevel = isBuy
@@ -821,12 +865,12 @@ namespace HyperliquidScanner.Forms
                 var limitSize = Math.Round(notional / limitPrice, szDecimals, MidpointRounding.ToZero);
                 if (limitSize <= 0) return;
 
-                var (ok, msg, oid) = await _client.PlaceLimitEntryAsync(
+                var (ok, msg, oid) = await account.Client.PlaceLimitEntryAsync(
                     pos.Symbol, isBuy, limitPrice, limitSize, szDecimals);
 
                 if (ok)
                 {
-                    _srLimitOrders[pos.Symbol] = (oid, DateTime.UtcNow);
+                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (oid, DateTime.UtcNow);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} limit {Side} @ {Price:G6}  size={Size}  oid={Oid}",
                         pos.Symbol, isBuy ? "BUY" : "SELL", limitPrice, limitSize, oid);
@@ -848,50 +892,53 @@ namespace HyperliquidScanner.Forms
         private static readonly TimeSpan SRGracePeriod = TimeSpan.FromSeconds(15);
 
         private async Task CancelSRLimitsForClosedPositionsAsync(
-            List<PositionInfo> openPositions, CancellationToken ct)
+            AccountContext account, List<PositionInfo> openPositions, CancellationToken ct)
         {
             if (_srLimitOrders.Count == 0) return;
-            var openSymbols = openPositions.Select(p => p.Symbol)
-                                           .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var sym in _srLimitOrders.Keys.ToList())
+            var openKeys = openPositions.Select(p => DK(p.AccountName, p.Symbol))
+                                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var prefix = account.Name + "::";
+            foreach (var key in _srLimitOrders.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
             {
-                if (openSymbols.Contains(sym)) continue;
-                var riskCfg = _config.GetRiskConfig(sym);
+                if (openKeys.Contains(key)) continue;
+                var symbol  = key.Substring(prefix.Length);
+                var riskCfg = account.GetRiskConfig(symbol);
                 if (!riskCfg.PreorderAtSRCancelOnExit) continue;
 
                 // Grace period — don't cancel if limit was placed very recently.
                 // Prevents race where refresh fires before new position appears in API response.
-                if (DateTime.UtcNow - _srLimitOrders[sym].placedAt < SRGracePeriod)
+                if (DateTime.UtcNow - _srLimitOrders[key].placedAt < SRGracePeriod)
                 {
-                    Serilog.Log.Debug("[SR Preorder] {Symbol} cancel suppressed — within grace period", sym);
+                    Serilog.Log.Debug("[SR Preorder] {Symbol} cancel suppressed — within grace period", symbol);
                     continue;
                 }
 
-                await CancelSRLimitAsync(sym, ct);
+                await CancelSRLimitAsync(account, symbol, ct);
             }
         }
 
-        private async Task CancelSRLimitAsync(string symbol, CancellationToken ct = default)
+        private async Task CancelSRLimitAsync(AccountContext account, string symbol, CancellationToken ct = default)
         {
-            if (!_srLimitOrders.TryGetValue(symbol, out var entry)) return;
-            var assetInfo = _client.GetAssetIndex(symbol);
+            var key = DK(account.Name, symbol);
+            if (!_srLimitOrders.TryGetValue(key, out var entry)) return;
+            var assetInfo = account.Client.GetAssetIndex(symbol);
             if (assetInfo != null)
             {
-                var (ok, msg) = await _client.CancelOrderAsync(assetInfo.Value.index, entry.oid, ct);
+                var (ok, msg) = await account.Client.CancelOrderAsync(assetInfo.Value.index, entry.oid, ct);
                 Serilog.Log.Information("[SR Preorder] Cancel {Symbol} oid={Oid}: {Result}",
                     symbol, entry.oid, ok ? "ok" : msg);
             }
-            _srLimitOrders.Remove(symbol);
+            _srLimitOrders.Remove(key);
         }
 
-        private async Task ClosePositionAsync(PositionInfo pos, bool cancelSRLimit = false,
+        private async Task ClosePositionAsync(AccountContext account, PositionInfo pos, bool cancelSRLimit = false,
                                                decimal? limitPrice = null)
         {
             try
             {
                 var isBuy     = !pos.IsLong;
                 var isLimit   = limitPrice.HasValue;
-                var assetInfo = _client.GetAssetIndex(pos.Symbol);
+                var assetInfo = account.Client.GetAssetIndex(pos.Symbol);
                 if (assetInfo == null)
                 {
                     BeginInvoke(() => ShowOrderResult(pos.Symbol,
@@ -899,35 +946,36 @@ namespace HyperliquidScanner.Forms
                     return;
                 }
 
-                if (cancelSRLimit) await CancelSRLimitAsync(pos.Symbol);
+                if (cancelSRLimit) await CancelSRLimitAsync(account, pos.Symbol);
 
                 // Cancel any tracked limit close order for this symbol
-                if (_limitCloseOrders.TryGetValue(pos.Symbol, out var lco) && assetInfo != null)
+                var closeKey = DK(account.Name, pos.Symbol);
+                if (_limitCloseOrders.TryGetValue(closeKey, out var lco) && assetInfo != null)
                 {
-                    await _client.CancelOrderAsync(assetInfo.Value.index, lco.Oid, ct: default);
-                    _limitCloseOrders.Remove(pos.Symbol);
+                    await account.Client.CancelOrderAsync(assetInfo.Value.index, lco.Oid, ct: default);
+                    _limitCloseOrders.Remove(closeKey);
                 }
 
                 bool ok; string msg; long closeOid = 0;
                 if (isLimit)
                 {
-                    (ok, msg, closeOid) = await _client.PlaceLimitCloseAsync(
+                    (ok, msg, closeOid) = await account.Client.PlaceLimitCloseAsync(
                         pos.Symbol, isBuy, limitPrice!.Value, pos.Size, assetInfo.Value.szDecimals);
                 }
                 else
                 {
-                    (ok, msg) = await _client.PlaceMarketCloseAsync(
+                    (ok, msg) = await account.Client.PlaceMarketCloseAsync(
                         pos.Symbol, isBuy, pos.MarkPrice, pos.Size, assetInfo.Value.szDecimals);
                 }
 
                 if (ok)
                 {
-                    _monitor?.ClearSymbol(pos.Symbol);
+                    account.Monitor?.ClearSymbol(pos.Symbol);
 
                     // Track limit close order for size-sync on DCA
                     if (isLimit && closeOid > 0)
                     {
-                        _limitCloseOrders[pos.Symbol] = (closeOid, limitPrice!.Value, pos.Size);
+                        _limitCloseOrders[closeKey] = (closeOid, limitPrice!.Value, pos.Size);
                         Serilog.Log.Information(
                             "[LimitClose] {Symbol} tracking oid={Oid} price={Price} size={Size}",
                             pos.Symbol, closeOid, limitPrice.Value, pos.Size);
@@ -952,18 +1000,22 @@ namespace HyperliquidScanner.Forms
         /// If filled and TP/SL prices were set, places bracket trigger orders.
         /// </summary>
         private async Task CheckPendingLimitEntriesAsync(
+            AccountContext account,
             List<PositionInfo> positions,
             List<(long oid, int assetIndex, bool isBuy, decimal price, decimal size)> openOrders,
             CancellationToken ct)
         {
             var openOids = new HashSet<long>(openOrders.Select(o => o.oid));
+            var prefix   = account.Name + "::";
 
-            foreach (var (symbol, pending) in _pendingLimitEntries.ToList())
+            foreach (var (key, pending) in _pendingLimitEntries.Where(kv => kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
             {
                 if (openOids.Contains(pending.Oid)) continue; // still resting
 
+                var symbol = key.Substring(prefix.Length);
+
                 // Order gone — did a position appear? (filled) or not (cancelled)
-                _pendingLimitEntries.Remove(symbol);
+                _pendingLimitEntries.Remove(key);
                 var pos = positions.FirstOrDefault(p =>
                     p.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
 
@@ -979,7 +1031,7 @@ namespace HyperliquidScanner.Forms
                     "[Bracket] {Symbol} limit entry oid={Oid} filled — placing bracket TP={Tp} SL={Sl}",
                     symbol, pending.Oid, pending.TpPrice, pending.SlPrice);
 
-                await PlaceManualBracketAsync(symbol, pos, pending, ct);
+                await PlaceManualBracketAsync(account, symbol, pos, pending, ct);
             }
         }
 
@@ -988,9 +1040,9 @@ namespace HyperliquidScanner.Forms
         /// TP = limit trigger (non-market).  SL = market trigger.
         /// </summary>
         private async Task PlaceManualBracketAsync(
-            string symbol, PositionInfo pos, PendingBracket pending, CancellationToken ct)
+            AccountContext account, string symbol, PositionInfo pos, PendingBracket pending, CancellationToken ct)
         {
-            var assetInfo = _client.GetAssetIndex(symbol);
+            var assetInfo = account.Client.GetAssetIndex(symbol);
             if (assetInfo == null)
             {
                 Serilog.Log.Warning("[Bracket] {Symbol} — asset index not found, bracket skipped", symbol);
@@ -1003,7 +1055,7 @@ namespace HyperliquidScanner.Forms
 
             if (pending.TpPrice.HasValue)
             {
-                (tpOk, _, _) = await _client.PlaceTriggerOrderAsync(
+                (tpOk, _, _) = await account.Client.PlaceTriggerOrderAsync(
                     symbol, closingBuy,
                     pending.TpPrice.Value, pending.TpPrice.Value,
                     pos.Size, pending.SzDecimals, "tp", isMarket: false, ct);
@@ -1011,7 +1063,7 @@ namespace HyperliquidScanner.Forms
 
             if (pending.SlPrice.HasValue)
             {
-                (slOk, _, _) = await _client.PlaceTriggerOrderAsync(
+                (slOk, _, _) = await account.Client.PlaceTriggerOrderAsync(
                     symbol, closingBuy,
                     pending.SlPrice.Value, pending.SlPrice.Value,
                     pos.Size, pending.SzDecimals, "sl", isMarket: true, ct);
@@ -1033,20 +1085,24 @@ namespace HyperliquidScanner.Forms
         /// If the limit close order fills or position disappears, tracking is removed.
         /// </summary>
         private async Task SyncLimitCloseOrdersAsync(
+            AccountContext account,
             List<PositionInfo> positions,
             List<(long oid, int assetIndex, bool isBuy, decimal price, decimal size)> openOrders,
             CancellationToken ct)
         {
             var openOids = new HashSet<long>(openOrders.Select(o => o.oid));
+            var prefix   = account.Name + "::";
 
-            foreach (var (symbol, (oid, limitPrice, trackedSize)) in _limitCloseOrders.ToList())
+            foreach (var (key, (oid, limitPrice, trackedSize)) in _limitCloseOrders
+                         .Where(kv => kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
             {
-                var assetInfo = _client.GetAssetIndex(symbol);
+                var symbol    = key.Substring(prefix.Length);
+                var assetInfo = account.Client.GetAssetIndex(symbol);
 
                 // Order no longer on the book — filled or cancelled externally
                 if (!openOids.Contains(oid))
                 {
-                    _limitCloseOrders.Remove(symbol);
+                    _limitCloseOrders.Remove(key);
                     Serilog.Log.Information(
                         "[LimitClose] {Symbol} oid={Oid} gone from open orders — tracking removed", symbol, oid);
                     continue;
@@ -1059,8 +1115,8 @@ namespace HyperliquidScanner.Forms
                 if (pos == null)
                 {
                     if (assetInfo != null)
-                        await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
-                    _limitCloseOrders.Remove(symbol);
+                        await account.Client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+                    _limitCloseOrders.Remove(key);
                     Serilog.Log.Information(
                         "[LimitClose] {Symbol} position gone — limit close oid={Oid} cancelled", symbol, oid);
                     continue;
@@ -1069,15 +1125,15 @@ namespace HyperliquidScanner.Forms
                 // Position size changed (DCA) — cancel and replace with new size
                 if (pos.Size != trackedSize && assetInfo != null)
                 {
-                    await _client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
+                    await account.Client.CancelOrderAsync(assetInfo.Value.index, oid, ct);
 
                     var isBuy = !pos.IsLong;
-                    var (ok, _, newOid) = await _client.PlaceLimitCloseAsync(
+                    var (ok, _, newOid) = await account.Client.PlaceLimitCloseAsync(
                         symbol, isBuy, limitPrice, pos.Size, assetInfo.Value.szDecimals, ct);
 
                     if (ok && newOid > 0)
                     {
-                        _limitCloseOrders[symbol] = (newOid, limitPrice, pos.Size);
+                        _limitCloseOrders[key] = (newOid, limitPrice, pos.Size);
                         Serilog.Log.Information(
                             "[LimitClose] {Symbol} size {Old}→{New} — limit close updated oid={Oid}",
                             symbol, trackedSize, pos.Size, newOid);
@@ -1086,7 +1142,7 @@ namespace HyperliquidScanner.Forms
                     }
                     else
                     {
-                        _limitCloseOrders.Remove(symbol);
+                        _limitCloseOrders.Remove(key);
                         Serilog.Log.Warning(
                             "[LimitClose] {Symbol} failed to replace limit close after size change", symbol);
                     }

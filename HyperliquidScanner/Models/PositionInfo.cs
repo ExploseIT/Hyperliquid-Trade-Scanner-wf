@@ -18,6 +18,9 @@ namespace HyperliquidScanner.Models
         public string  LeverageType     { get; set; } = "cross"; // "cross" or "isolated"
         public decimal MarginUsed       { get; set; }   // USD margin allocated
 
+        /// <summary>Name of the sub-account that holds this position (e.g. "HL for Shorts").</summary>
+        public string AccountName { get; set; } = string.Empty;
+
         public string SideLabel    => IsLong ? "Long" : "Short";
         public string LeverageLabel => $"{Leverage}× {LeverageType}";
     }
