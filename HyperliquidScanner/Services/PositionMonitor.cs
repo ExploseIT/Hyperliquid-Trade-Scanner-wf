@@ -648,7 +648,10 @@ namespace HyperliquidScanner.Services
 
         /// <summary>
         /// Places either a limit or market close, depending on the isLimit flag.
-        /// When limit: price = freshPrice + offsetUsd (signed, so negative = below mark).
+        /// When limit: the offset magnitude is auto-applied on the maker-favourable side
+        /// based on close direction — closing a short (isBuy) rests BELOW mark,
+        /// closing a long (sell) rests ABOVE mark. The sign of offsetUsd is ignored,
+        /// so the same config value works correctly whether the position is long or short.
         /// Returns (ok, message) in both cases.
         /// </summary>
         private async Task<(bool ok, string msg)> PlaceCloseOrderAsync(
@@ -657,9 +660,10 @@ namespace HyperliquidScanner.Services
         {
             if (isLimit)
             {
-                var limitPrice = freshPrice + offsetUsd;
-                Log.Debug("{Trigger} {Symbol}: limit close @ {Price:G6} (fresh {Fresh:G6} + offset {Off})",
-                    triggerName, symbol, limitPrice, freshPrice, offsetUsd);
+                var magnitude  = Math.Abs(offsetUsd);
+                var limitPrice = isBuy ? freshPrice - magnitude : freshPrice + magnitude;
+                Log.Debug("{Trigger} {Symbol}: limit close @ {Price:G6} (fresh {Fresh:G6} {Sign} {Off} — {Side})",
+                    triggerName, symbol, limitPrice, freshPrice, isBuy ? "-" : "+", magnitude, isBuy ? "buy/closing short" : "sell/closing long");
                 var (ok, msg, _) = await _client.PlaceLimitCloseAsync(symbol, isBuy, limitPrice, size, szDec, ct);
                 return (ok, msg);
             }
