@@ -167,6 +167,7 @@ namespace HyperliquidScanner.Forms
                 new DataGridViewTextBoxColumn { HeaderText = "Trail",    Name = "Trail",    MinimumWidth = 120 },
                 new DataGridViewTextBoxColumn { HeaderText = "Status",   Name = "Status",   MinimumWidth = 160 },
                 new DataGridViewButtonColumn  { HeaderText = "+",         Name = "Enter",    MinimumWidth = 36, Width = 36, FlatStyle = FlatStyle.Flat },
+                new DataGridViewButtonColumn  { HeaderText = "🎯",        Name = "Bracket",  MinimumWidth = 36, Width = 36, FlatStyle = FlatStyle.Flat },
                 new DataGridViewButtonColumn  { HeaderText = "⏹",        Name = "Close",    MinimumWidth = 36, Width = 36, FlatStyle = FlatStyle.Flat }
             );
 
@@ -553,18 +554,51 @@ namespace HyperliquidScanner.Forms
         {
             var colName = _grid.Columns[e.ColumnIndex].Name;
 
-            // Separator row (null tag) or watchlist row (Size==0) — paint blank for Close column
-            if (e.RowIndex >= 0 && colName is "Enter" or "Close")
+            // Separator row (null tag) or watchlist row (Size==0) — paint blank for Close/Bracket columns
+            if (e.RowIndex >= 0 && colName is "Enter" or "Close" or "Bracket")
             {
                 var rowTag = _grid.Rows[e.RowIndex].Tag;
                 bool isNonPosition = rowTag == null ||
-                                     (rowTag is PositionInfo wp && wp.Size == 0 && colName == "Close");
+                                     (rowTag is PositionInfo wp && wp.Size == 0 && colName is "Close" or "Bracket");
                 if (isNonPosition)
                 {
                     e.PaintBackground(e.ClipBounds, true);
                     e.Handled = true;
                     return;
                 }
+            }
+
+            // ── Bracket (set native TP/SL) button column ──────────────────────
+            if (colName == "Bracket")
+            {
+                e.PaintBackground(e.ClipBounds, true);
+
+                if (e.RowIndex < 0)
+                {
+                    using var headerFont = new Font("Segoe UI Symbol", 9f);
+                    var txt  = "🎯";
+                    var size = TextRenderer.MeasureText(txt, headerFont);
+                    var x    = e.CellBounds.Left + (e.CellBounds.Width  - size.Width)  / 2;
+                    var y    = e.CellBounds.Top  + (e.CellBounds.Height - size.Height) / 2;
+                    TextRenderer.DrawText(e.Graphics, txt, headerFont,
+                        new Point(x, y), Color.FromArgb(160, 160, 160));
+                    e.Handled = true;
+                    return;
+                }
+
+                var bb = new Rectangle(
+                    e.CellBounds.Left + 4, e.CellBounds.Top + 3,
+                    e.CellBounds.Width - 8, e.CellBounds.Height - 6);
+                using var bbBrush = new SolidBrush(Color.FromArgb(35, 90, 110));
+                e.Graphics.FillRectangle(bbBrush, bb);
+                using var bbPen = new Pen(Color.FromArgb(70, 160, 195));
+                e.Graphics.DrawRectangle(bbPen, bb);
+                using var bbFont = new Font("Segoe UI Symbol", 8f);
+                TextRenderer.DrawText(e.Graphics, "🎯", bbFont, bb,
+                    Color.FromArgb(110, 200, 230),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                e.Handled = true;
+                return;
             }
 
             // ── Entry button column ───────────────────────────────────────────
@@ -700,6 +734,15 @@ namespace HyperliquidScanner.Forms
                     _ = EnterPositionAsync(account, pos, riskCfg, size, assetInfo.Value.szDecimals,
                                            assetInfo.Value.index);
                 }
+                return;
+            }
+
+            if (colName == "Bracket")
+            {
+                if (_grid.Rows[e.RowIndex].Tag is not PositionInfo bpos || bpos.Size == 0) return;
+                var bAccount = GetAccount(bpos);
+                var bRiskCfg = bAccount.GetRiskConfig(bpos.Symbol);
+                _ = SetNativeBracketAsync(bAccount, bpos, bRiskCfg);
                 return;
             }
 
@@ -1078,6 +1121,63 @@ namespace HyperliquidScanner.Forms
 
             Serilog.Log.Information("[Bracket] {Msg}", result);
             BeginInvoke(() => ShowOrderResult(symbol, result, tpOk && slOk));
+        }
+
+        /// <summary>
+        /// Opens a dialog to retroactively place native exchange-side TP/SL trigger orders
+        /// on an EXISTING open position — for positions opened outside LiquidScanner's own
+        /// limit-entry flow (e.g. manually on the exchange, or via a market entry), which
+        /// never get the automatic bracket-on-fill treatment. The dialog pre-fills suggested
+        /// prices from the symbol's configured tpUsd/slUsd PnL thresholds, fully editable.
+        /// </summary>
+        private async Task SetNativeBracketAsync(AccountContext account, PositionInfo pos, SymbolRiskConfig riskCfg)
+        {
+            var assetInfo = account.Client.GetAssetIndex(pos.Symbol);
+            if (assetInfo == null)
+            {
+                ShowOrderResult(pos.Symbol, $"🎯 {pos.Symbol}: asset index not found — bracket skipped", false);
+                return;
+            }
+
+            var pnlSign  = pos.UnrealisedPnl >= 0 ? "+" : "";
+            var sizeDesc = $"Size: {pos.Size:G6} {pos.Symbol}   PnL: {pnlSign}{pos.UnrealisedPnl:F2} USD";
+
+            using var dlg = new PositionBracketDialog(
+                $"Set Native TP/SL — {pos.SideLabel} {pos.Symbol}",
+                pos.EntryPrice, pos.MarkPrice, sizeDesc,
+                suggestedTpUsd: riskCfg.TpEnabled ? riskCfg.TpUsd : (decimal?)null,
+                suggestedSlUsd: riskCfg.SlEnabled ? riskCfg.SlUsd : (decimal?)null,
+                size: pos.Size, isLong: pos.IsLong);
+
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            if (dlg.TpPrice == null && dlg.SlPrice == null) return;
+
+            // To CLOSE a long: sell (isBuy=false).  To CLOSE a short: buy (isBuy=true).
+            var closingBuy = !pos.IsLong;
+            bool tpOk = true, slOk = true;
+
+            if (dlg.TpPrice.HasValue)
+            {
+                (tpOk, _, _) = await account.Client.PlaceTriggerOrderAsync(
+                    pos.Symbol, closingBuy,
+                    dlg.TpPrice.Value, dlg.TpPrice.Value,
+                    pos.Size, assetInfo.Value.szDecimals, "tp", isMarket: false, CancellationToken.None);
+            }
+
+            if (dlg.SlPrice.HasValue)
+            {
+                (slOk, _, _) = await account.Client.PlaceTriggerOrderAsync(
+                    pos.Symbol, closingBuy,
+                    dlg.SlPrice.Value, dlg.SlPrice.Value,
+                    pos.Size, assetInfo.Value.szDecimals, "sl", isMarket: true, CancellationToken.None);
+            }
+
+            var result = $"🎯 Native bracket {pos.Symbol}  " +
+                         (dlg.TpPrice.HasValue ? $"TP {dlg.TpPrice:G8} {(tpOk ? "✓" : "✗")}  " : "") +
+                         (dlg.SlPrice.HasValue ? $"SL {dlg.SlPrice:G8} {(slOk ? "✓" : "✗")}" : "");
+
+            Serilog.Log.Information("[Bracket] (manual/retroactive) {Msg}", result);
+            ShowOrderResult(pos.Symbol, result, tpOk && slOk);
         }
 
         // ── Limit close size sync ─────────────────────────────────────────────
