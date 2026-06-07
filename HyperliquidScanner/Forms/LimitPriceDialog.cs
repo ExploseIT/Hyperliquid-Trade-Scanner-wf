@@ -6,6 +6,12 @@ namespace HyperliquidScanner.Forms
     /// The user sees the mark price, edits a signed USD offset, and the limit price
     /// auto-updates live. TP and SL are optional — leave at 0 to skip each one.
     ///
+    /// When <paramref name="suggestedTpUsd"/>/<paramref name="suggestedSlUsd"/> (the symbol's
+    /// configured PnL-based auto TP/SL thresholds) and a position size are supplied, the TP/SL
+    /// price boxes are pre-filled with the price levels that correspond to those PnL thresholds
+    /// at the initial limit price — purely as an editable starting suggestion, so the user isn't
+    /// stuck typing prices from scratch. They remain fully overridable.
+    ///
     /// Results:
     ///   LimitPrice  — chosen limit order price (null = cancelled)
     ///   TpPrice     — take-profit trigger price (null = not set)
@@ -31,9 +37,21 @@ namespace HyperliquidScanner.Forms
         /// <param name="defaultOffsetUsd">Pre-filled signed USD offset from config.</param>
         /// <param name="sizeDescription">e.g. "Size: 0.01639  (~$1,000 notional)"</param>
         /// <param name="showBracket">If true, shows the TP/SL bracket section.</param>
+        /// <param name="suggestedTpUsd">Symbol's configured PnL-based auto take-profit threshold
+        /// (e.g. tpUsd = 5 means "+$5 unrealised PnL"), used only to pre-fill a suggested TP
+        /// price. Pass null to leave TP at 0 (disabled).</param>
+        /// <param name="suggestedSlUsd">Symbol's configured PnL-based auto stop-loss threshold
+        /// (e.g. slUsd = 5 means "-$5 unrealised PnL"), used only to pre-fill a suggested SL
+        /// price. Pass null to leave SL at 0 (disabled).</param>
+        /// <param name="size">Position size, required to convert the PnL thresholds above into
+        /// price levels (priceDelta = pnlUsd / size). Ignored if suggestions are null.</param>
+        /// <param name="isLong">True if this is a long entry (TP sits above entry, SL below);
+        /// false for a short (TP below entry, SL above).</param>
         public LimitPriceDialog(string title, decimal markPrice,
                                 decimal defaultOffsetUsd, string sizeDescription,
-                                bool showBracket = true)
+                                bool showBracket = true,
+                                decimal? suggestedTpUsd = null, decimal? suggestedSlUsd = null,
+                                decimal size = 0m, bool isLong = true)
         {
             _markPrice = markPrice;
 
@@ -49,6 +67,27 @@ namespace HyperliquidScanner.Forms
 
             BuildControls(defaultOffsetUsd, sizeDescription, showBracket);
             UpdateLimitPrice();
+
+            if (showBracket && size > 0m)
+            {
+                var entryPrice = markPrice + defaultOffsetUsd;
+
+                if (suggestedTpUsd is decimal tpUsd && tpUsd > 0m)
+                {
+                    var tpDelta = tpUsd / size;
+                    var tpPrice = isLong ? entryPrice + tpDelta : entryPrice - tpDelta;
+                    if (tpPrice > 0m)
+                        _tpInput.Value = Math.Clamp(tpPrice, _tpInput.Minimum, _tpInput.Maximum);
+                }
+
+                if (suggestedSlUsd is decimal slUsd && slUsd > 0m)
+                {
+                    var slDelta = slUsd / size;
+                    var slPrice = isLong ? entryPrice - slDelta : entryPrice + slDelta;
+                    if (slPrice > 0m)
+                        _slInput.Value = Math.Clamp(slPrice, _slInput.Minimum, _slInput.Maximum);
+                }
+            }
         }
 
         private void BuildControls(decimal defaultOffset, string sizeDesc, bool showBracket)

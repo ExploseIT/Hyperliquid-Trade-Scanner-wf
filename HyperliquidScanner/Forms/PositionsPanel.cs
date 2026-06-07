@@ -672,7 +672,10 @@ namespace HyperliquidScanner.Forms
                     var sizeDesc = $"Size: {size:G6}  (~${size * pos.MarkPrice:F2} notional)";
                     using var dlg = new LimitPriceDialog(
                         $"Limit {direction} Entry — {pos.Symbol}",
-                        pos.MarkPrice, riskCfg.TradeOrderOffsetUsd, sizeDesc, showBracket: true);
+                        pos.MarkPrice, riskCfg.TradeOrderOffsetUsd, sizeDesc, showBracket: true,
+                        suggestedTpUsd: riskCfg.TpEnabled ? riskCfg.TpUsd : (decimal?)null,
+                        suggestedSlUsd: riskCfg.SlEnabled ? riskCfg.SlUsd : (decimal?)null,
+                        size: size, isLong: riskCfg.TradeIsLong);
                     if (dlg.ShowDialog(this) != DialogResult.OK || dlg.LimitPrice == null) return;
                     _ = EnterPositionAsync(account, pos, riskCfg, size, assetInfo.Value.szDecimals,
                                            assetInfo.Value.index, limitPrice: dlg.LimitPrice,
