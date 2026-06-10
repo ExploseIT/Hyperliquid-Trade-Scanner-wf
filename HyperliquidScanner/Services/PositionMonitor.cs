@@ -118,11 +118,12 @@ namespace HyperliquidScanner.Services
         {
             if (positions.Count == 0) return;
 
-            // Only proceed if at least one symbol has SL or TP enabled
+            // Only proceed if at least one symbol has some risk-management feature enabled
             var anyEnabled = positions.Any(p =>
             {
                 var cfg = GetRiskConfig(p.Symbol);
-                return cfg.SlEnabled || cfg.TpEnabled;
+                return cfg.SlEnabled || cfg.TpEnabled || cfg.TrailingEnabled
+                       || cfg.ExchangeTrailingEnabled || cfg.MaSlEnabled;
             });
             if (!anyEnabled) return;
 
