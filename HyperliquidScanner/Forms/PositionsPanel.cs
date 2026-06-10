@@ -201,7 +201,7 @@ namespace HyperliquidScanner.Forms
         // SR pre-order limit tracking: symbol → (order ID, time placed)
         // Cancelled automatically when position closes (if cancelonexit=true)
         // Grace period of 15s prevents race condition where refresh fires before new position is visible
-        private readonly Dictionary<string, (long oid, DateTime placedAt)> _srLimitOrders
+        private readonly Dictionary<string, (long oid, DateTime placedAt, bool seenPositionOpen)> _srLimitOrders
             = new(StringComparer.OrdinalIgnoreCase);
 
         public async Task RefreshAsync(CancellationToken ct = default)
@@ -898,7 +898,7 @@ namespace HyperliquidScanner.Forms
                 if (existingOid.HasValue)
                 {
                     // Track it so we can cancel on exit, and skip placing a new one
-                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (existingOid.Value, DateTime.UtcNow);
+                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (existingOid.Value, DateTime.UtcNow, false);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} existing limit found near {Price:G6} oid={Oid} — skipping new order",
                         pos.Symbol, limitPrice, existingOid.Value);
@@ -916,7 +916,7 @@ namespace HyperliquidScanner.Forms
 
                 if (ok)
                 {
-                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (oid, DateTime.UtcNow);
+                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (oid, DateTime.UtcNow, false);
                     Serilog.Log.Information(
                         "[SR Preorder] {Symbol} limit {Side} @ {Price:G6}  size={Size}  oid={Oid}",
                         pos.Symbol, isBuy ? "BUY" : "SELL", limitPrice, limitSize, oid);
@@ -946,10 +946,26 @@ namespace HyperliquidScanner.Forms
             var prefix = account.Name + "::";
             foreach (var key in _srLimitOrders.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
             {
-                if (openKeys.Contains(key)) continue;
+                if (openKeys.Contains(key))
+                {
+                    // Mark that a position has now been seen for this symbol — only
+                    // once a position has actually existed do we treat a subsequent
+                    // "no position" state as an exit worth cancelling the SR limit for.
+                    var e = _srLimitOrders[key];
+                    if (!e.seenPositionOpen)
+                        _srLimitOrders[key] = (e.oid, e.placedAt, true);
+                    continue;
+                }
+
                 var symbol  = key.Substring(prefix.Length);
                 var riskCfg = account.GetRiskConfig(symbol);
                 if (!riskCfg.PreorderAtSRCancelOnExit) continue;
+
+                // Pre-entry: the SR limit was placed before any position existed
+                // (e.g. alongside a not-yet-filled entry limit) — don't cancel it
+                // just because there's still no position yet.
+                if (!_srLimitOrders[key].seenPositionOpen)
+                    continue;
 
                 // Grace period — don't cancel if limit was placed very recently.
                 // Prevents race where refresh fires before new position appears in API response.
