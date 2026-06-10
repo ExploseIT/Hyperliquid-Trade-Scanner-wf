@@ -434,10 +434,20 @@ namespace HyperliquidScanner.Forms
                     splitContainer.SplitterDistance = splitContainer.Height - 185;
             };
 
-            // On startup: initialise asset indexes (needed for order placement) then load positions
+            // On startup: initialise asset indexes (needed for order placement) then load positions.
+            // Each sub-account has its own HyperliquidClient instance with its own asset-index
+            // cache, so every account's client must be initialised independently — otherwise
+            // entry/close buttons fail with "Asset index not found" until a full scan runs.
             Load += async (_, _) =>
             {
                 await _client.InitialiseAssetIndexesAsync();
+
+                if (_accountManager != null)
+                {
+                    await Task.WhenAll(_accountManager.Accounts
+                        .Select(a => a.Client.InitialiseAssetIndexesAsync()));
+                }
+
                 await _positionsPanel.RefreshAsync();
                 await UpdatePortfolioLabelAsync();
                 SetupConfigWatcher();
