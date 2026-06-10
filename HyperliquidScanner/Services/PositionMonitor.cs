@@ -644,14 +644,21 @@ namespace HyperliquidScanner.Services
             }
             else
             {
-                // First placement: only place if the MA is already on the favourable side of mark
-                // (otherwise an immediate-trigger order would be rejected/instantly fire)
+                // First placement: place immediately so the position is protected
+                // right away. If the MA is currently on the "wrong" side of mark
+                // (would trigger instantly), fall back to a small safety buffer
+                // beyond mark instead — the SL will ratchet to the MA itself once
+                // the MA moves favourable on a later candle close.
                 bool maValid = pos.IsLong ? maPrice < pos.MarkPrice : maPrice > pos.MarkPrice;
                 if (!maValid)
                 {
-                    Log.Debug("MaSl: {Symbol} {Period}-MA {Ma:G6} is on the wrong side of mark {Mark:G6} — skipped initial placement",
-                        pos.Symbol, period, maPrice, pos.MarkPrice);
-                    return;
+                    const decimal safetyPct = 0.01m; // 1% beyond mark as initial placeholder SL
+                    maPrice = pos.IsLong
+                        ? pos.MarkPrice * (1 - safetyPct)
+                        : pos.MarkPrice * (1 + safetyPct);
+                    Log.Information(
+                        "MaSl: {Symbol} {Period}-MA is on the wrong side of mark — placing initial safety SL @ {Sl:G6} instead, will ratchet to MA on next favourable candle",
+                        pos.Symbol, period, maPrice);
                 }
             }
 
