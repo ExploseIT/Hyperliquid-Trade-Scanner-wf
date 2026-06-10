@@ -46,13 +46,30 @@ namespace HyperliquidScanner.Services
         /// as 0x-prefixed hex strings, matching Hyperliquid's expected format.
         /// </summary>
         public static (string r, string s, int v) Sign(
-            byte[] actionBytes, long nonce, string privateKey, bool isMainnet = true)
+            byte[] actionBytes, long nonce, string privateKey, bool isMainnet = true, string? vaultAddress = null)
         {
             // Step 1–3: build connectionId
             var nonceBytes = BitConverter.GetBytes((ulong)nonce);
             if (BitConverter.IsLittleEndian) Array.Reverse(nonceBytes);
 
-            var data         = actionBytes.Concat(nonceBytes).Append((byte)0x00).ToArray();
+            // Vault/sub-account flag: 0x00 if signing for own account, otherwise
+            // 0x01 followed by the 20-byte vault/sub-account address.
+            byte[] vaultBytes;
+            if (string.IsNullOrWhiteSpace(vaultAddress))
+            {
+                vaultBytes = new byte[] { 0x00 };
+            }
+            else
+            {
+                var hex = vaultAddress.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                    ? vaultAddress[2..] : vaultAddress;
+                var addrBytes = Enumerable.Range(0, hex.Length / 2)
+                    .Select(i => Convert.ToByte(hex.Substring(i * 2, 2), 16))
+                    .ToArray();
+                vaultBytes = new byte[] { 0x01 }.Concat(addrBytes).ToArray();
+            }
+
+            var data         = actionBytes.Concat(nonceBytes).Concat(vaultBytes).ToArray();
             var connectionId = KeccakRaw(data);  // 32 bytes
 
             // Debug: log intermediate values to compare with Python SDK

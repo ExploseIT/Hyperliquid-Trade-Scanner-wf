@@ -21,6 +21,7 @@ namespace HyperliquidScanner.Services
         // Credentials — may be overridden per sub-account
         private readonly string _walletAddress;
         private readonly string _privateKey;
+        private readonly string? _vaultAddress;
         private bool HasPrivateKey => !string.IsNullOrWhiteSpace(_privateKey);
 
         // Asset index cache: symbol → (universe index, size decimals)
@@ -35,6 +36,21 @@ namespace HyperliquidScanner.Services
             _privateKey    = accountOverride?.PrivateKey    ?? config.PrivateKey;
             _http          = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _http.DefaultRequestHeaders.Add("User-Agent", "LiquidScanner/1.0");
+
+            // If the configured private key derives to a different address than the
+            // account's wallet address, this is an agent wallet trading on behalf of
+            // that account — Hyperliquid requires the "vaultAddress" field (which also
+            // covers sub-accounts) to route signed actions to that account.
+            if (HasPrivateKey && !string.IsNullOrWhiteSpace(_walletAddress))
+            {
+                try
+                {
+                    var agentAddress = new Nethereum.Signer.EthECKey(_privateKey).GetPublicAddress();
+                    if (!string.Equals(agentAddress, _walletAddress, StringComparison.OrdinalIgnoreCase))
+                        _vaultAddress = _walletAddress;
+                }
+                catch { /* leave _vaultAddress null — fall back to default account */ }
+            }
         }
 
         /// <summary>
@@ -576,7 +592,7 @@ namespace HyperliquidScanner.Services
                     assetIndex, isBuy, priceStr, sizeStr, reduceOnly, tif);
 
                 // Sign
-                var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
+                var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey, vaultAddress: _vaultAddress);
 
                 // Build request
                 var action = new
@@ -597,7 +613,9 @@ namespace HyperliquidScanner.Services
                     grouping = "na"
                 };
 
-                var json = JsonConvert.SerializeObject(new { action, nonce, signature = new { r, s, v } });
+                var json = _vaultAddress != null
+                    ? JsonConvert.SerializeObject(new { action, nonce, signature = new { r, s, v }, vaultAddress = _vaultAddress })
+                    : JsonConvert.SerializeObject(new { action, nonce, signature = new { r, s, v } });
                 Log.Debug("PlaceOrder debug: asset={A} isBuy={B} price={P} size={S} tif={T} nonce={N}",
                     assetIndex, isBuy, priceStr, sizeStr, tif, nonce);
                 Log.Debug("PlaceOrder request body: {Json}", json);
@@ -725,13 +743,21 @@ namespace HyperliquidScanner.Services
             if (!HasPrivateKey) return (false, "No private key configured.");
             var nonce       = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var actionBytes = HyperliquidSigner.SerializeCancelOrder(assetIndex, orderId);
-            var (r, s, v)   = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
-            var body = new
-            {
-                action    = new { type = "cancel", cancels = new[] { new { a = assetIndex, o = orderId } } },
-                nonce,
-                signature = new { r, s, v }
-            };
+            var (r, s, v)   = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey, vaultAddress: _vaultAddress);
+            object body = _vaultAddress != null
+                ? new
+                {
+                    action    = new { type = "cancel", cancels = new[] { new { a = assetIndex, o = orderId } } },
+                    nonce,
+                    signature = new { r, s, v },
+                    vaultAddress = _vaultAddress
+                }
+                : new
+                {
+                    action    = new { type = "cancel", cancels = new[] { new { a = assetIndex, o = orderId } } },
+                    nonce,
+                    signature = new { r, s, v }
+                };
             try
             {
                 var json     = Newtonsoft.Json.JsonConvert.SerializeObject(body);
@@ -769,26 +795,24 @@ namespace HyperliquidScanner.Services
 
             var actionBytes = HyperliquidSigner.SerializeTriggerOrder(
                 assetIndex, isBuy, priceStr, trigStr, sizeStr, true, tpsl, isMarket);
-            var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey);
+            var (r, s, v) = HyperliquidSigner.Sign(actionBytes, nonce, _privateKey, vaultAddress: _vaultAddress);
 
-            var body = new
+            var triggerAction = new
             {
-                action = new
+                type   = "order",
+                orders = new[]
                 {
-                    type   = "order",
-                    orders = new[]
+                    new
                     {
-                        new
-                        {
-                            a = assetIndex, b = isBuy, p = priceStr, s = sizeStr, r = true,
-                            t = new { trigger = new { triggerPx = trigStr, isMarket, tpsl } }
-                        }
-                    },
-                    grouping = "na"
+                        a = assetIndex, b = isBuy, p = priceStr, s = sizeStr, r = true,
+                        t = new { trigger = new { triggerPx = trigStr, isMarket, tpsl } }
+                    }
                 },
-                nonce,
-                signature = new { r, s, v }
+                grouping = "na"
             };
+            object body = _vaultAddress != null
+                ? new { action = triggerAction, nonce, signature = new { r, s, v }, vaultAddress = _vaultAddress }
+                : new { action = triggerAction, nonce, signature = new { r, s, v } };
             try
             {
                 var json     = Newtonsoft.Json.JsonConvert.SerializeObject(body);
