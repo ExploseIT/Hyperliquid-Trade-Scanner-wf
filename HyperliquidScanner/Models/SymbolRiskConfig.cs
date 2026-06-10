@@ -87,6 +87,25 @@ namespace HyperliquidScanner.Models
         [JsonProperty("trailingStepUsd")]
         public decimal TrailingStepUsd { get; set; } = 5m;
 
+        /// <summary>
+        /// Enable a moving-average-based exchange SL: each time a new candle closes on
+        /// maSlTimeframe, the SL is recalculated as the maSlPeriod simple moving average
+        /// of closes, and the exchange SL trigger order is moved to that price — but only
+        /// if the new level is more favourable than the current one (ratchet only, never
+        /// gives back protection). Mutually exclusive with exchangeTrailing_enabled —
+        /// only one native SL ratcheting mechanism should manage a position at a time.
+        /// </summary>
+        [JsonProperty("maSl_enabled")]
+        public bool MaSlEnabled { get; set; } = false;
+
+        /// <summary>SMA period for the MA-based SL (e.g. 50 = 50-period simple moving average).</summary>
+        [JsonProperty("maSlPeriod")]
+        public int MaSlPeriod { get; set; } = 50;
+
+        /// <summary>Candle timeframe used for the MA-based SL (e.g. "15m", "1h").</summary>
+        [JsonProperty("maSlTimeframe")]
+        public string MaSlTimeframe { get; set; } = "15m";
+
         // ── Phase 3: RSI-LL auto-entry ────────────────────────────────────────
 
         /// <summary>Enable automatic entry on RSI Lower Low signal for this symbol.</summary>

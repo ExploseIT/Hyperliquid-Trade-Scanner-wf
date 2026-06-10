@@ -41,6 +41,9 @@ namespace HyperliquidScanner.Services
             public decimal ExchangeSlPrice   { get; set; }          // current SL price on exchange
             public decimal LastRatchetPnl    { get; set; } = decimal.MinValue; // PnL when SL last moved
 
+            // MA-based exchange SL state
+            public long    LastMaCandleCloseMs { get; set; }        // close time of last candle the MA was recalculated on
+
             // DCA / new-position detection
             public decimal LastKnownSize     { get; set; }
             public decimal LastKnownEntry    { get; set; }
@@ -205,9 +208,10 @@ namespace HyperliquidScanner.Services
                     state.TrailingActive    = false;
                     state.TrailingFired     = false;
                     state.HighWaterMarkUsd  = decimal.MinValue;
-                    state.ExchangeSlOrderId = 0;
-                    state.ExchangeSlPrice   = 0;
-                    state.LastRatchetPnl    = decimal.MinValue;
+                    state.ExchangeSlOrderId   = 0;
+                    state.ExchangeSlPrice     = 0;
+                    state.LastRatchetPnl      = decimal.MinValue;
+                    state.LastMaCandleCloseMs = 0;
                     state.InitialPnlPct    = pos.PnlPercent;
                     state.LastKnownSize    = pos.Size;
                     state.LastKnownEntry   = pos.EntryPrice;
@@ -306,6 +310,10 @@ namespace HyperliquidScanner.Services
                 // ── Exchange ratcheting trailing stop ─────────────────────────
                 if (riskConfig.ExchangeTrailingEnabled && !state.TrailingFired)
                     await UpdateExchangeTrailingSlAsync(pos, riskConfig, state, ct);
+
+                // ── MA-based exchange SL (recalculated on each new candle close) ─
+                if (riskConfig.MaSlEnabled && !riskConfig.ExchangeTrailingEnabled && !state.TrailingFired)
+                    await UpdateMaBasedSlAsync(pos, riskConfig, state, ct);
 
                 // Update state flags
                 if (pos.UnrealisedPnl > -riskConfig.SlUsd) state.HasBeenAboveSl = true;
@@ -579,6 +587,91 @@ namespace HyperliquidScanner.Services
             {
                 Log.Warning("ExchangeTrailing: failed to place SL for {Symbol}: {Msg}",
                     pos.Symbol, msg);
+            }
+        }
+
+        /// <summary>
+        /// Recalculates and ratchets a native exchange SL based on a simple moving average.
+        /// Fetches recent candles for cfg.MaSlTimeframe; when a NEW candle close is detected
+        /// (vs. the last one we recalculated on), computes the cfg.MaSlPeriod SMA of closes
+        /// and — if that level is more favourable than the current exchange SL (long: higher,
+        /// short: lower) — cancels the old SL and places a new one at the MA price.
+        /// Never moves the SL against the position (ratchet only).
+        /// </summary>
+        private async Task UpdateMaBasedSlAsync(
+            PositionInfo pos, SymbolRiskConfig cfg, SymbolState state, CancellationToken ct)
+        {
+            var period = Math.Max(2, cfg.MaSlPeriod);
+
+            var candles = await _client.GetCandlesAsync(pos.Symbol, cfg.MaSlTimeframe, period + 1, ct);
+            if (candles.Count < period) return;
+
+            // Use only fully-closed candles (drop the last one if it's still open)
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var closed = candles.Where(c => c.CloseTimeMs <= nowMs).ToList();
+            if (closed.Count < period) return;
+
+            var lastClosed = closed[^1];
+            if (lastClosed.CloseTimeMs <= state.LastMaCandleCloseMs) return; // no new candle yet
+            state.LastMaCandleCloseMs = lastClosed.CloseTimeMs;
+
+            var maPrice = closed.Skip(closed.Count - period).Average(c => c.Close);
+
+            var assetInfo = _client.GetAssetIndex(pos.Symbol);
+            if (assetInfo == null) return;
+            var (assetIndex, szDec) = assetInfo.Value;
+
+            // Only ratchet in the favourable direction (never move SL against position)
+            if (state.ExchangeSlOrderId != 0)
+            {
+                bool slImproved = pos.IsLong
+                    ? maPrice > state.ExchangeSlPrice   // long: new SL must be higher
+                    : maPrice < state.ExchangeSlPrice;  // short: new SL must be lower
+                if (!slImproved)
+                {
+                    Log.Debug("MaSl: {Symbol} new {Period}-MA {Ma:G6} not favourable vs current SL {Sl:G6} — skipped",
+                        pos.Symbol, period, maPrice, state.ExchangeSlPrice);
+                    return;
+                }
+
+                var (cancelOk, _) = await _client.CancelOrderAsync(assetIndex, state.ExchangeSlOrderId, ct);
+                if (!cancelOk)
+                {
+                    Log.Warning("MaSl: failed to cancel SL oid={Oid} for {Symbol}",
+                        state.ExchangeSlOrderId, pos.Symbol);
+                }
+                state.ExchangeSlOrderId = 0;
+            }
+            else
+            {
+                // First placement: only place if the MA is already on the favourable side of mark
+                // (otherwise an immediate-trigger order would be rejected/instantly fire)
+                bool maValid = pos.IsLong ? maPrice < pos.MarkPrice : maPrice > pos.MarkPrice;
+                if (!maValid)
+                {
+                    Log.Debug("MaSl: {Symbol} {Period}-MA {Ma:G6} is on the wrong side of mark {Mark:G6} — skipped initial placement",
+                        pos.Symbol, period, maPrice, pos.MarkPrice);
+                    return;
+                }
+            }
+
+            var (ok, msg, oid) = await _client.PlaceTriggerOrderAsync(
+                pos.Symbol, !pos.IsLong, maPrice, maPrice,
+                pos.Size, szDec, "sl", true, ct);
+
+            if (ok)
+            {
+                state.ExchangeSlOrderId = oid;
+                state.ExchangeSlPrice   = maPrice;
+                Log.Information(
+                    "MaSl ratchet: {Symbol} SL → {SlPrice:G6} ({Period}-{Tf} SMA)  oid={Oid}",
+                    pos.Symbol, maPrice, period, cfg.MaSlTimeframe, oid);
+                OrderPlaced?.Invoke(pos.Symbol,
+                    $"📉 MA-SL ratcheted: {pos.Symbol} → ${maPrice:G6} ({period}-{cfg.MaSlTimeframe} SMA)");
+            }
+            else
+            {
+                Log.Warning("MaSl: failed to place SL for {Symbol}: {Msg}", pos.Symbol, msg);
             }
         }
 
