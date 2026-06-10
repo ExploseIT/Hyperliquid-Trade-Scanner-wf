@@ -713,22 +713,23 @@ namespace HyperliquidScanner.Services
         /// Used to avoid placing duplicate SR pre-orders.
         /// </summary>
         public async Task<long?> FindExistingSRLimitAsync(
-            string symbol, bool isBuy, decimal currentPrice, CancellationToken ct = default)
+            string symbol, bool isBuy, decimal targetPrice, decimal tolerancePct = 0.005m, CancellationToken ct = default)
         {
             var orders = await GetOpenOrdersAsync(ct);
             var assetInfo = GetAssetIndex(symbol);
             if (assetInfo == null) return null;
+
+            var lo = targetPrice * (1 - tolerancePct);
+            var hi = targetPrice * (1 + tolerancePct);
 
             foreach (var (oid, assetIndex, orderIsBuy, price, _) in orders)
             {
                 if (assetIndex != assetInfo.Value.index) continue;
                 if (orderIsBuy != isBuy) continue;
 
-                // For shorts (sell limit): order price should be above current price
-                // For longs  (buy  limit): order price should be below current price
-                bool isAboveCurrent = price > currentPrice;
-                if (isBuy && !isAboveCurrent) return oid;  // buy limit below current
-                if (!isBuy && isAboveCurrent) return oid;  // sell limit above current
+                // Match only orders close to the SR target price — avoids confusing
+                // the regular near-mark entry limit with the SR-level pre-order.
+                if (price >= lo && price <= hi) return oid;
             }
             return null;
         }

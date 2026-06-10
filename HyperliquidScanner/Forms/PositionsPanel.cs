@@ -867,22 +867,6 @@ namespace HyperliquidScanner.Forms
         {
             try
             {
-                // Check if an SR-style limit already exists on the exchange
-                var existingOid = await account.Client.FindExistingSRLimitAsync(
-                    pos.Symbol, isBuy, pos.MarkPrice);
-
-                if (existingOid.HasValue)
-                {
-                    // Track it so we can cancel on exit, and skip placing a new one
-                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (existingOid.Value, DateTime.UtcNow);
-                    Serilog.Log.Information(
-                        "[SR Preorder] {Symbol} existing limit found oid={Oid} — skipping new order",
-                        pos.Symbol, existingOid.Value);
-                    BeginInvoke(() => ShowOrderResult(pos.Symbol,
-                        $"📌 SR limit already exists (oid {existingOid.Value})", true));
-                    return;
-                }
-
                 var candles = await account.Client.GetCandlesAsync(pos.Symbol, riskCfg.SRTimeframe, 100);
                 if (candles == null || candles.Count == 0) return;
 
@@ -906,6 +890,22 @@ namespace HyperliquidScanner.Forms
                 var limitPrice = isBuy
                     ? srLevel.Value * (1 - riskCfg.PreorderAtSROffsetPct)
                     : srLevel.Value * (1 + riskCfg.PreorderAtSROffsetPct);
+
+                // Check if an SR-style limit already exists near this specific level
+                var existingOid = await account.Client.FindExistingSRLimitAsync(
+                    pos.Symbol, isBuy, limitPrice);
+
+                if (existingOid.HasValue)
+                {
+                    // Track it so we can cancel on exit, and skip placing a new one
+                    _srLimitOrders[DK(account.Name, pos.Symbol)] = (existingOid.Value, DateTime.UtcNow);
+                    Serilog.Log.Information(
+                        "[SR Preorder] {Symbol} existing limit found near {Price:G6} oid={Oid} — skipping new order",
+                        pos.Symbol, limitPrice, existingOid.Value);
+                    BeginInvoke(() => ShowOrderResult(pos.Symbol,
+                        $"📌 SR limit already exists (oid {existingOid.Value})", true));
+                    return;
+                }
 
                 var notional  = riskCfg.PreorderAtSRSizeUsd * riskCfg.TradeLeverage;
                 var limitSize = Math.Round(notional / limitPrice, szDecimals, MidpointRounding.ToZero);
