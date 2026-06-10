@@ -125,8 +125,8 @@ namespace HyperliquidScanner.Services
             string size, bool reduceOnly, string tpsl, bool isMarket)
         {
             var triggerMap = Map(
-                ("triggerPx", Str(triggerPrice)),
                 ("isMarket",  Bool(isMarket)),
+                ("triggerPx", Str(triggerPrice)),
                 ("tpsl",      Str(tpsl))
             );
             var typeMap  = Map(("trigger", triggerMap));
